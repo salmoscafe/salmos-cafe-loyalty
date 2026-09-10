@@ -1,0 +1,360 @@
+import React, { useEffect, useState } from "react";
+import "./styles.css";
+
+import { authService, salesService, ManualSalesAdapter } from "./services/index.js";
+import { getCardForCustomer } from "./services/index.js";
+import { rewardService } from "./services/index.js";
+
+import { Wordmark, IconMark } from "./components/common/BrandMark.jsx";
+import { BottomNav } from "./components/layout/BottomNav.jsx";
+import { QrModal } from "./components/layout/QrModal.jsx";
+import { Spinner } from "./components/common/ui.jsx";
+
+import { AuthScreen } from "./components/auth/AuthScreen.jsx";
+import { HomeScreen } from "./screens/client/Home.jsx";
+import { RewardsScreen } from "./screens/client/Rewards.jsx";
+import { ActivityScreen } from "./screens/client/Activity.jsx";
+import { ProfileScreen } from "./screens/client/Profile.jsx";
+import { SettingsScreen } from "./screens/client/Settings.jsx";
+
+import { StaffLoginScreen } from "./screens/staff/StaffLogin.jsx";
+import { StaffHomeScreen } from "./screens/staff/StaffHome.jsx";
+import { ScannerScreen } from "./screens/staff/Scanner.jsx";
+import { CustomerFoundScreen } from "./screens/staff/CustomerFound.jsx";
+import { RegisterSaleScreen } from "./screens/staff/RegisterSale.jsx";
+import { ConfirmationScreen } from "./screens/staff/Confirmation.jsx";
+import { StaffActivityScreen } from "./screens/staff/StaffActivity.jsx";
+
+import { AdminDashboard } from "./screens/admin/Dashboard.jsx";
+import { AdminCustomers } from "./screens/admin/Customers.jsx";
+import { ComingSoon } from "./screens/admin/ComingSoon.jsx";
+
+/* =========================================================
+   Root — en producción, Cliente / Staff / Admin son três
+   despliegues o rutas separadas (distinto dominio o distinto
+   guard de auth), no una decisión que tome el propio frontend
+   en tiempo de ejecución. El selector de abajo existe SOLO
+   para poder enseñar los tres flujos en esta demo — no debe
+   sobrevivir a la Fase 1 tal cual.
+   ========================================================= */
+export default function App() {
+  const [appMode, setAppMode] = useState("client");
+
+  return (
+    <div className="sc-root">
+      <div className="sc-ambient" aria-hidden="true" />
+      <div className="sc-dev-switcher">
+        {["client", "staff", "admin"].map((m) => (
+          <button
+            key={m}
+            className={"sc-dev-switcher__btn" + (appMode === m ? " sc-dev-switcher__btn--active" : "")}
+            onClick={() => setAppMode(m)}
+          >
+            {m === "client" ? "Cliente" : m === "staff" ? "Staff" : "Admin"}
+          </button>
+        ))}
+      </div>
+
+      {appMode === "client" && <ClientApp />}
+      {appMode === "staff" && <StaffApp />}
+      {appMode === "admin" && <AdminApp />}
+    </div>
+  );
+}
+
+/* --------------------------- Cliente --------------------------- */
+
+function ClientApp() {
+  const [session, setSession] = useState(undefined); // undefined = cargando
+  const [screen, setScreen] = useState("home");
+  const [loyalty, setLoyalty] = useState({ card: null, cycle: null, currentReward: null, loading: true, error: null });
+  const [qr, setQr] = useState({ open: false, mode: "show" });
+  const [refreshTick, setRefreshTick] = useState(0);
+
+  useEffect(() => {
+    authService.getSession().then((s) => setSession(s));
+    const unsubscribe = authService.onSessionChange(() => {
+      authService.getSession().then((s) => setSession(s));
+    });
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    let cancelled = false;
+    setLoyalty((s) => ({ ...s, loading: true, error: null }));
+    getCardForCustomer(session.customer.id)
+      .then(async ({ card, cycle }) => {
+        if (cancelled) return;
+        const currentReward = card ? await rewardService.getCurrentReward(card.id) : null;
+        if (cancelled) return;
+        setLoyalty({ card, cycle, currentReward, loading: false, error: null });
+      })
+      .catch(() => !cancelled && setLoyalty((s) => ({ ...s, loading: false, error: "No pudimos cargar tu tarjeta." })));
+    return () => {
+      cancelled = true;
+    };
+  }, [session, refreshTick]);
+
+  if (session === undefined) {
+    return (
+      <div className="sc-phone">
+        <div className="sc-main"><Spinner label="Cargando…" /></div>
+      </div>
+    );
+  }
+
+  if (session === null) {
+    return (
+      <div className="sc-phone">
+        <div className="sc-main">
+          <AuthScreen onSignedIn={() => authService.getSession().then(setSession)} />
+        </div>
+      </div>
+    );
+  }
+
+  const { customer } = session;
+
+  function refresh() {
+    setRefreshTick((t) => t + 1);
+  }
+
+  async function handleRetrySync() {
+    const res = await authService.retryLoyverseSync();
+    if (res.ok) {
+      const s = await authService.getSession();
+      setSession(s);
+    }
+    return res;
+  }
+
+  async function handleSignOut() {
+    await authService.signOutClient();
+    setSession(null);
+    setScreen("home");
+  }
+
+  return (
+    <div className="sc-phone">
+      <header className="sc-topbar">
+        <IconMark on="cream" className="sc-topbar__mark" />
+        <span className="sc-topbar__name">Salmos Café</span>
+      </header>
+
+      <main className="sc-main">
+        {screen === "home" && (
+          <HomeScreen
+            customer={customer}
+            card={loyalty.card}
+            cycle={loyalty.cycle}
+            currentReward={loyalty.currentReward}
+            loading={loyalty.loading}
+            error={loyalty.error}
+            onRetry={refresh}
+            onRetrySync={handleRetrySync}
+            onOpenQr={(mode) => setQr({ open: true, mode })}
+          />
+        )}
+        {screen === "rewards" && !loyalty.loading && loyalty.card && (
+          <RewardsScreen card={loyalty.card} cycle={loyalty.cycle} currentReward={loyalty.currentReward} />
+        )}
+        {screen === "activity" && !loyalty.loading && loyalty.card && (
+          <ActivityScreen customer={customer} card={loyalty.card} />
+        )}
+        {screen === "profile" && !loyalty.loading && loyalty.card && (
+          <ProfileScreen
+            customer={customer}
+            card={loyalty.card}
+            onRetrySync={handleRetrySync}
+            onOpenSettings={() => setScreen("settings")}
+            onSignOut={handleSignOut}
+          />
+        )}
+        {screen === "settings" && <SettingsScreen onBack={() => setScreen("profile")} />}
+      </main>
+
+      {screen !== "settings" && (
+        <BottomNav screen={screen} onNavigate={(s) => { setScreen(s); if (s === "home") refresh(); }} onQr={() => setQr({ open: true, mode: "show" })} />
+      )}
+
+      {loyalty.card && (
+        <QrModal
+          open={qr.open}
+          mode={qr.mode}
+          onClose={() => setQr({ open: false, mode: "show" })}
+          cardNumber={loyalty.card.cardNumber}
+          customerName={customer.name}
+        />
+      )}
+    </div>
+  );
+}
+
+/* --------------------------- Staff --------------------------- */
+
+function StaffApp() {
+  const [staffSession, setStaffSession] = useState(undefined);
+  const [screen, setScreen] = useState("home");
+  const [found, setFound] = useState(null); // { customer, card, cycle }
+  const [saleResult, setSaleResult] = useState(null);
+
+  useEffect(() => {
+    authService.getStaffSession().then((s) => setStaffSession(s));
+  }, []);
+
+  if (staffSession === undefined) {
+    return (
+      <div className="sc-phone">
+        <div className="sc-main"><Spinner label="Cargando…" /></div>
+      </div>
+    );
+  }
+
+  if (staffSession === null) {
+    return (
+      <div className="sc-phone">
+        <div className="sc-main">
+          <StaffLoginScreen onSignedIn={() => authService.getStaffSession().then(setStaffSession)} />
+        </div>
+      </div>
+    );
+  }
+
+  const { staff } = staffSession;
+
+  async function handleSignOut() {
+    await authService.signOutStaff();
+    setStaffSession(null);
+    setScreen("home");
+    setFound(null);
+  }
+
+  async function handleSubmitSale({ amount, paymentMethod, branchId }) {
+    const normalized = ManualSalesAdapter.normalizeSale({
+      customerId: found.customer.id,
+      cardId: found.card.id,
+      branchId,
+      amount,
+      paymentMethod,
+      employeeId: staff.id,
+    });
+    const res = await salesService.registerSale(normalized);
+    if (res.ok) {
+      setSaleResult(res);
+      setScreen("confirmation");
+    }
+    return res;
+  }
+
+  return (
+    <div className="sc-phone">
+      <header className="sc-topbar">
+        <IconMark on="cream" className="sc-topbar__mark" />
+        <span className="sc-topbar__name">Salmos Café · Equipo</span>
+      </header>
+
+      <main className="sc-main">
+        {screen === "home" && (
+          <StaffHomeScreen
+            staff={staff}
+            onScan={() => setScreen("scanner")}
+            onActivity={() => setScreen("activity")}
+            onSignOut={handleSignOut}
+          />
+        )}
+
+        {screen === "scanner" && (
+          <ScannerScreen
+            onBack={() => setScreen("home")}
+            onFound={(res) => {
+              setFound({ customer: res.customer, card: res.card, cycle: res.cycle });
+              setScreen("found");
+            }}
+          />
+        )}
+
+        {screen === "found" && found && (
+          <CustomerFoundScreen
+            customer={found.customer}
+            card={found.card}
+            cycle={found.cycle}
+            staff={staff}
+            onBack={() => setScreen("scanner")}
+            onRegisterSale={() => setScreen("sale")}
+            onRedeemed={({ newCycle }) => setFound((f) => ({ ...f, cycle: newCycle }))}
+          />
+        )}
+
+        {screen === "sale" && found && (
+          <RegisterSaleScreen
+            customer={found.customer}
+            card={found.card}
+            onBack={() => setScreen("found")}
+            onSubmit={handleSubmitSale}
+          />
+        )}
+
+        {screen === "confirmation" && saleResult && found && (
+          <ConfirmationScreen
+            customer={found.customer}
+            sale={saleResult.sale}
+            cycle={saleResult.cycle}
+            newReward={saleResult.newReward}
+            onRegisterAnother={() => setScreen("scanner")}
+            onDone={() => {
+              setFound(null);
+              setSaleResult(null);
+              setScreen("home");
+            }}
+          />
+        )}
+
+        {screen === "activity" && <StaffActivityScreen staff={staff} onBack={() => setScreen("home")} />}
+      </main>
+    </div>
+  );
+}
+
+/* --------------------------- Admin --------------------------- */
+
+function AdminApp() {
+  const [tab, setTab] = useState("dashboard");
+  const TABS = [
+    { key: "dashboard", label: "Dashboard" },
+    { key: "customers", label: "Clientes" },
+    { key: "sales", label: "Ventas" },
+    { key: "rewards", label: "Recompensas" },
+    { key: "staff", label: "Staff" },
+    { key: "settings", label: "Configuración" },
+  ];
+
+  return (
+    <div className="sc-admin-shell">
+      <aside className="sc-admin-sidebar">
+        <div className="sc-admin-sidebar__brand">
+          <Wordmark on="navy" className="sc-admin-sidebar__wordmark" />
+        </div>
+        <nav>
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              className={"sc-admin-sidebar__item" + (tab === t.key ? " sc-admin-sidebar__item--active" : "")}
+              onClick={() => setTab(t.key)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </nav>
+      </aside>
+      <main className="sc-admin-main">
+        {tab === "dashboard" && <AdminDashboard />}
+        {tab === "customers" && <AdminCustomers />}
+        {tab === "sales" && <ComingSoon title="Ventas" />}
+        {tab === "rewards" && <ComingSoon title="Recompensas" />}
+        {tab === "staff" && <ComingSoon title="Staff" />}
+        {tab === "settings" && <ComingSoon title="Configuración" />}
+      </main>
+    </div>
+  );
+}
