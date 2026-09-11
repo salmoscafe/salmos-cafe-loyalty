@@ -425,6 +425,11 @@ deno_version = 2
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
+# Función loyalty-engine (D1.2-1). Requiere Authorization: Bearer <JWT>;
+# verify_jwt = true fuerza la validación de sesión GoTrue en la plataforma.
+[functions.loyalty-engine]
+verify_jwt = true
+
 [analytics]
 enabled = true
 port = 54327
