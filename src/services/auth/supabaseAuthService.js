@@ -1,41 +1,44 @@
 // ---------------------------------------------------------------
 // authService (implementación REAL) — Supabase Auth + customers.
 //
-// Mantiene EXACTAMENTE el mismo contrato público que el mock
-// (identifyAccount/requestCode/verifyCode/...), así la UI que ya
-// existe (AuthScreen y sus estados) no cambia. Diferencias internas
-// respecto al mock:
+// Contrato (idéntico al mock, ver authService.js facade):
+//   * signUpWithEmail / signInWithPassword  ← auth PRINCIPAL por contraseña
+//   * forgotPassword* / setNewPassword      ← OTP SOLO como recuperación
+//   * signInWithGoogle                      ← OAuth
+//   * checkSecondaryContact / resendConfirmationEmail / sesión (getSession…)
 //
-//   * identifyAccount usa signInWithOtp({shouldCreateUser:false})
-//     como probe anti-enumeración: sin error → la cuenta existe;
-//     "Signups not allowed for otp" / "not allowed for otp" →
-//     cuenta NO existe. La UI no percibe esto: solo ve
-//     existing | new.
-//   * verifyCode usa supabase.auth.verifyOtp (el código lo maneja
-//     Supabase, no nosotros).
-//   * completeRegistration asegura el perfil `customers` en la base
-//     real (con customer_code único) y dispara la sincronización con
-//     Loyverse a través de la Edge Function segura — nunca directo.
-//   * La sesión sobrevive refresh (persistSession + onAuthStateChange).
-//
-// Google queda encapsulado (signInWithGoogle). Su flujo completo de
-// confirmación para usuarios nuevos se afinará cuando estén las
-// credenciales de producción.
+// Cómo funciona cada pieza sobre Supabase:
+//   * signInWithPassword acepta email O teléfono como identificador.
+//     El teléfono se resuelve a email con la función segura
+//     resolve_email_for_login (migración 0003, SECURITY DEFINER) para
+//     NO romper RLS; la validación de la contraseña la hace SIEMPRE
+//     GoTrue, nunca esa función.
+//   * forgotPasswordStart envía un código al correo (un solo de uso)
+//     vía signInWithOtp({shouldCreateUser:false}); no hay proveedor SMS
+//     configurado, así que aún con teléfono la recuperación va al correo.
+//   * verifyOtp (forgotPasswordVerify) crea una sesión efímera que
+//     setNewPassword aprovecha para actualizar la contraseña con
+//     updateUser. No quedan sesiones "tocadas por magia" después: la
+//     recuperación termina y el usuario vuelve a entrar con su contraseña.
+//   * Cada alta de sesión asegura el perfil `customers` (idempotente,
+//     customer_code único) y dispara la vinculación Loyverse a través de
+//     la Edge Function segura — nunca directo. Si falla, la sesión igual
+//     se entrega y SyncBanner ofrece reintentar.
 // ---------------------------------------------------------------
 
 import { supabaseClient } from "../../lib/supabase/client.js";
 import { generateCustomerCode } from "../../lib/customerCode.js";
+import { toE164Mx } from "../../lib/phone.js";
 import { ensureLoyaltyProfile } from "../customers/customerService.js";
 import { createOrLinkLoyverseCustomer } from "../loyverse/loyverseCustomerService.js";
+import { makeError, toFriendlyError } from "./authErrors.js";
 
-// Verificación pendiente (identify → código enviado → verificar).
-// En real no guardamos el código (lo maneja Supabase); solo el contexto
-// de qué camino estamos recorriendo (new | existing, email | phone).
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MIN_PASSWORD = 8;
+
+// Contexto de recuperación en curso (email dest). La verificación del
+// código la maneja Supabase; aquí solo guardamos adónde se envió.
 let pending = null;
-
-function normalizePhoneDigits(value) {
-  return String(value).replace(/\D/g, "");
-}
 
 function maskContact(method, value) {
   if (method === "email") {
@@ -48,61 +51,43 @@ function maskContact(method, value) {
   return `••• •••${digits.slice(-2)}`;
 }
 
-function isUserNotFoundError(error) {
-  const msg = String(error?.message || "").toLowerCase();
-  const code = String(error?.code || "");
-  return (
-    msg.includes("signups not allowed") ||
-    msg.includes("not allowed for otp") ||
-    msg.includes("user not found") ||
-    code === "otp_disabled" ||
-    code === "signup_disabled"
-  );
+// Resuelve "email o teléfono" → email de la cuenta.
+//   * Identificadores con "@" pasan directo a GoTrue (él decide el error).
+//   * Teléfonos se resuelven vía RPC seguro (solo devuelve email si hay
+//     UNA coincidencia exacta por dígitos). Sin coincidencia → la app
+//     pide usar el correo ("No encontramos una cuenta…").
+async function resolveLoginEmail(identifierRaw) {
+  const identifier = String(identifierRaw || "").trim();
+  if (!identifier) return { ok: false, error: makeError("INVALID_CREDENTIALS") };
+
+  if (identifier.includes("@")) {
+    return { ok: true, email: identifier.toLowerCase() };
+  }
+
+  if (!supabaseClient) return { ok: false, error: makeError("NETWORK_ERROR") };
+  try {
+    const { data, error } = await supabaseClient.rpc("resolve_email_for_login", {
+      p_identifier: phoneIdentifierForLogin(identifier),
+    });
+    if (error) return { ok: false, error: toFriendlyError(error) };
+    if (!data) return { ok: false, error: makeError("ACCOUNT_NOT_FOUND") };
+    return { ok: true, email: String(data).toLowerCase() };
+  } catch {
+    return { ok: false, error: makeError("NETWORK_ERROR") };
+  }
 }
 
-// Envía un OTP (email o phone). Devuelve "existing" | "new" | "transient".
-async function sendOtp(method, value, { shouldCreateUser }) {
-  if (!supabaseClient) return "transient";
-  const options = { shouldCreateUser };
-  const { error } =
-    method === "email"
-      ? await supabaseClient.auth.signInWithOtp({ email: value.trim().toLowerCase(), options })
-      : await supabaseClient.auth.signInWithOtp({ phone: value, options });
-
-  if (!error) return "existing";
-  if (isUserNotFoundError(error)) return "new";
-  return "transient";
-}
-
-async function getCurrentUser() {
-  if (!supabaseClient) return null;
-  const {
-    data: { user },
-  } = await supabaseClient.auth.getUser();
-  return user;
+// Normaliza el teléfono a E.164 (+52) ANTES de mandarlo al RPC, porque en
+// `customers` se almacena E.164 y el usuario escribe normalmente 10 dígitos.
+// Si no se puede deducir un teléfono mexicano válido se pasa el texto tal
+// cual: el RPC decide por dígitos y no lo reconoce (cuenta no encontrada).
+export function phoneIdentifierForLogin(identifier) {
+  return toE164Mx(identifier) || identifier;
 }
 
 // ---------------------------------------------------------------------------
-// Perfil `customers` (Supabase). La filta real del cliente de Salmos.
+// Perfil `customers` (Supabase). La fila real del cliente de Salmos.
 // ---------------------------------------------------------------------------
-
-function buildEmailPhone(user, { primary, secondary }) {
-  let email = null;
-  let phone = null;
-
-  if (primary) {
-    if (primary.method === "email") email = primary.value.trim().toLowerCase();
-    else phone = primary.value;
-  }
-  if (!email && (user.email || user.user_metadata?.email)) email = (user.email || user.user_metadata.email).toLowerCase();
-  if (!phone && (user.phone || user.user_metadata?.phone)) phone = user.phone || user.user_metadata.phone;
-
-  if (secondary) {
-    if (secondary.method === "email") email = (email || secondary.value).toLowerCase();
-    else if (!phone) phone = secondary.value;
-  }
-  return { email, phone };
-}
 
 async function uniqueCustomerCode() {
   for (let i = 0; i < 6; i++) {
@@ -135,9 +120,9 @@ export async function ensureCustomerProfile(user, { name, email, phone }) {
   const insertRow = {
     auth_user_id: user.id,
     name: displayName || "Cliente Salmos",
-    email: email ?? null,
+    email: email ? String(email).trim().toLowerCase() : user.email || null,
     email_verified: Boolean(user.email_confirmed_at),
-    phone: phone ?? null,
+    phone: phone ? toE164Mx(phone) || String(phone).trim() : user.phone || null,
     customer_code: customerCode,
     loyverse_sync_status: "pending",
   };
@@ -164,15 +149,10 @@ async function runLoyverseSync(profile) {
   } catch {
     result = { status: "failed", error: "loyverse_unavailable" };
   }
-  // Persistimos el desenlace en la fila del cliente para que la sesión
-  // (y el banner de sync) reflejen la realidad aunque la Edge Function
-  // guarde el estado por su cuenta. RLS: solo es la fila del usuario.
   const dbStatus =
     result.status === "created" || result.status === "linked" || result.status === "already_synced"
       ? "synced"
-      : result.status === "conflict"
-        ? "failed"
-        : "failed";
+      : "failed";
   await supabaseClient
     .from("customers")
     .update({
@@ -208,11 +188,23 @@ async function buildSession(user) {
   // DEV BRIDGE: siembra el mock de lealtad para que Home/Rewards/etc.
   // sigan funcionando mientras la lealtad no migre a Supabase.
   ensureLoyaltyProfile(profile);
-  return { customer: toClientCustomer(profile) };
+
+  // Vinculación Loyverse (idempotente: ya-sincronizadas no hacen nada).
+  // Si falla la sesión se entrega igual y SyncBanner invita a reintentar.
+  let syncStatus = profile.loyverse_sync_status || "pending";
+  try {
+    const sync = await runLoyverseSync(profile);
+    if (sync.status === "created" || sync.status === "linked" || sync.status === "already_synced") syncStatus = "synced";
+    else syncStatus = "failed";
+  } catch {
+    syncStatus = "failed";
+  }
+
+  return { customer: toClientCustomer({ ...profile, loyverse_sync_status: syncStatus }) };
 }
 
 // ---------------------------------------------------------------------------
-// Contrato público (idéntico al mock) + helpers de sesión.
+// Sesión (helpers estables que la UI ya usa).
 // ---------------------------------------------------------------------------
 
 export async function getSession() {
@@ -238,123 +230,6 @@ export async function signOutClient() {
   return { ok: true };
 }
 
-export async function identifyAccount({ method, value }) {
-  const outcome = await sendOtp(method, value, { shouldCreateUser: false });
-  if (outcome === "transient") return { ok: false, error: "transient" };
-  return {
-    ok: true,
-    status: outcome, // existing | new
-    method,
-    value,
-    maskedContact: maskContact(method, value),
-  };
-}
-
-export async function requestCode({ method, value, forNewAccount }) {
-  const outcome = await sendOtp(method, value, { shouldCreateUser: true });
-  if (outcome === "transient") return { ok: false, error: "transient" };
-  pending = { mode: forNewAccount ? "new" : "existing", method, value };
-  return { ok: true, maskedContact: maskContact(method, value) };
-}
-
-export async function verifyCode({ code }) {
-  if (!pending) return { ok: false, error: "no_pending" };
-  const type = pending.method === "email" ? "email" : "sms";
-  const payload =
-    type === "email"
-      ? { type, email: pending.value.trim().toLowerCase(), token: code }
-      : { type, phone: pending.value, token: code };
-
-  const { error } = await supabaseClient.auth.verifyOtp(payload);
-  if (error) {
-    const msg = String(error.message || "").toLowerCase();
-    if (msg.includes("expire")) return { ok: false, error: "expired" };
-    return { ok: false, error: "invalid" };
-  }
-  return { ok: true, mode: pending.mode };
-}
-
-export async function resendCode() {
-  if (!pending) return { ok: false, error: "no_pending" };
-  return requestCode({ method: pending.method, value: pending.value, forNewAccount: pending.mode === "new" });
-}
-
-export function cancelPending() {
-  pending = null;
-}
-
-export async function checkSecondaryContact({ method, value }) {
-  if (!value) return { ok: true };
-  if (!supabaseClient) return { ok: true };
-  const user = await getCurrentUser();
-  let query = supabaseClient
-    .from("customers")
-    .select("id")
-    .neq("auth_user_id", user?.id || "");
-  query =
-    method === "email"
-      ? query.eq("email", value.trim().toLowerCase())
-      : query.eq("phone", value);
-  const { data } = await query.limit(1).maybeSingle();
-  if (data) {
-    return {
-      ok: false,
-      error: "conflict",
-      message:
-        method === "email"
-          ? "Este correo ya está asociado a otra cuenta de Salmos."
-          : "Este teléfono ya está asociado a otra cuenta de Salmos.",
-    };
-  }
-  return { ok: true };
-}
-
-export async function signInWithGoogle() {
-  if (!supabaseClient) return { ok: false, error: "transient" };
-  try {
-    const { error } = await supabaseClient.auth.signInWithOAuth({
-      provider: "google",
-      options: { redirectTo: window.location.origin },
-    });
-    if (error) return { ok: false, error: "Google no está disponible todavía." };
-    return { ok: true, status: "existing" };
-  } catch {
-    return { ok: false, error: "transient" };
-  }
-}
-
-export async function completeRegistration({ name, secondaryContact, googleProfile }) {
-  const user = await getCurrentUser();
-  if (!user) return { ok: false, error: "not_verified" };
-
-  if (googleProfile) {
-    // La sesión OAuth ya existe; solo aseguramos perfil + sync.
-    const profile = await ensureCustomerProfile(user, {
-      name: name || user.user_metadata?.name || user.user_metadata?.full_name,
-      email: user.email || googleProfile.email || null,
-      phone: secondaryContact?.method === "phone" ? secondaryContact.value : null,
-    });
-    const sync = await runLoyverseSync(profile);
-    pending = null;
-    return { ok: true, loyverseSyncStatus: sync.status };
-  }
-
-  // Camino OTP: la identidad ya quedó verificada en verifyCode.
-  // Guardamos el nombre en user_metadata para que el perfil lo herede.
-  if (name && name.trim()) {
-    await supabaseClient.auth.updateUser({ data: { ...(user.user_metadata || {}), name: name.trim() } });
-  }
-  const refreshed = await getCurrentUser();
-
-  const primary = pending ? { method: pending.method, value: pending.value } : null;
-  const { email, phone } = buildEmailPhone(refreshed, { primary, secondary: secondaryContact });
-
-  const profile = await ensureCustomerProfile(refreshed, { name: name || undefined, email, phone });
-  const sync = await runLoyverseSync(profile);
-  pending = null;
-  return { ok: true, loyverseSyncStatus: sync.status };
-}
-
 export async function retryLoyverseSync() {
   const { data: sessionData } = await supabaseClient.auth.getSession();
   if (!sessionData?.session?.user) return { ok: false };
@@ -366,6 +241,164 @@ export async function retryLoyverseSync() {
   }
   const result = await runLoyverseSync(profile);
   return { ok: result.status !== "failed" && result.status !== "conflict", ...result };
+}
+
+export function cancelPending() {
+  pending = null;
+}
+
+// ---------------------------------------------------------------------------
+// Auth PRINCIPAL — correo/teléfono + contraseña.
+// ---------------------------------------------------------------------------
+
+export async function signUpWithEmail({ email, password, name, phone }) {
+  if (!supabaseClient) return { ok: false, error: makeError("NETWORK_ERROR") };
+
+  const cleanEmail = String(email || "").trim().toLowerCase();
+  if (!EMAIL_RE.test(cleanEmail)) return { ok: false, error: makeError("EMAIL_INVALID") };
+  if (!password || password.length < MIN_PASSWORD) return { ok: false, error: makeError("WEAK_PASSWORD") };
+
+  const data = { name: String(name || "").trim() };
+  if (phone) data.phone = toE164Mx(phone) || String(phone).trim();
+
+  const { data: result, error } = await supabaseClient.auth.signUp({
+    email: cleanEmail,
+    password,
+    options: { data },
+  });
+  if (error) return { ok: false, error: toFriendlyError(error) };
+
+  // Si el proyecto pide confirmar el correo, no hay sesión aún → la UI le
+  // dice al cliente que revise su bandeja y vuelva a iniciar sesión.
+  const mode = result?.session ? "complete" : "confirm_email";
+  return { ok: true, mode };
+}
+
+export async function signInWithPassword({ identifier, password }) {
+  if (!supabaseClient) return { ok: false, error: makeError("NETWORK_ERROR") };
+
+  const resolved = await resolveLoginEmail(identifier);
+  if (!resolved.ok) return resolved;
+  if (!password) return { ok: false, error: makeError("INVALID_CREDENTIALS") };
+
+  const { error } = await supabaseClient.auth.signInWithPassword({
+    email: resolved.email,
+    password,
+  });
+  if (error) return { ok: false, error: toFriendlyError(error, "INVALID_CREDENTIALS") };
+  return { ok: true };
+}
+
+export async function checkSecondaryContact({ method, value }) {
+  if (!value) return { ok: true };
+  if (!supabaseClient) return { ok: true };
+
+  // RLS impide al anon leer `customers` antes del registro (siempre daría
+  // ok:true). Se comprueba en el servidor con funciones que NO abren RLS:
+  //  * phone_is_registered → sólo EXISTENCIA (booleano), sin email ni filas.
+  //  * resolve_email_for_login → email sólo si hay UNA cuenta con ese valor.
+  if (method === "phone") {
+    const normalized = toE164Mx(value) || String(value).trim();
+    try {
+      const { data, error } = await supabaseClient.rpc("phone_is_registered", {
+        p_phone: normalized,
+      });
+      if (error) return { ok: false, error: toFriendlyError(error) };
+      return data
+        ? { ok: false, error: makeError("PHONE_IN_USE") }
+        : { ok: true };
+    } catch {
+      return { ok: false, error: makeError("NETWORK_ERROR") };
+    }
+  }
+
+  const email = String(value).trim().toLowerCase();
+  try {
+    const { data, error } = await supabaseClient.rpc("resolve_email_for_login", {
+      p_identifier: email,
+    });
+    if (error) return { ok: false, error: toFriendlyError(error) };
+    return data && String(data).toLowerCase() === email
+      ? { ok: false, error: makeError("EMAIL_ALREADY_EXISTS") }
+      : { ok: true };
+  } catch {
+    return { ok: false, error: makeError("NETWORK_ERROR") };
+  }
+}
+
+export async function resendConfirmationEmail({ email }) {
+  if (!supabaseClient) return { ok: false };
+  const { error } = await supabaseClient.auth.resend({
+    type: "signup",
+    email: String(email || "").trim().toLowerCase(),
+  });
+  if (error) return { ok: false };
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Recuperación de contraseña — OTP por correo (fallback).
+// ---------------------------------------------------------------------------
+
+export async function forgotPasswordStart({ identifier }) {
+  if (!supabaseClient) return { ok: false, error: makeError("NETWORK_ERROR") };
+
+  const resolved = await resolveLoginEmail(identifier);
+  if (!resolved.ok) return resolved;
+
+  const { error } = await supabaseClient.auth.signInWithOtp({
+    email: resolved.email,
+    options: { shouldCreateUser: false },
+  });
+  if (error) return { ok: false, error: toFriendlyError(error, "NETWORK_ERROR") };
+
+  pending = { email: resolved.email, identifier };
+  return { ok: true, maskedContact: maskContact("email", resolved.email) };
+}
+
+export async function forgotPasswordVerify({ code }) {
+  if (!pending) return { ok: false, error: makeError("OTP_INVALID") };
+  const { error } = await supabaseClient.auth.verifyOtp({
+    type: "email",
+    email: pending.email,
+    token: String(code),
+  });
+  if (error) return { ok: false, error: toFriendlyError(error, "OTP_INVALID") };
+  // verifyOtp dejó una sesión efímera que setNewPassword aprovechará.
+  return { ok: true };
+}
+
+export async function forgotPasswordResend() {
+  if (!pending) return { ok: false };
+  return forgotPasswordStart({ identifier: pending.identifier });
+}
+
+export async function setNewPassword({ newPassword }) {
+  if (!supabaseClient) return { ok: false, error: makeError("NETWORK_ERROR") };
+  if (!newPassword || newPassword.length < MIN_PASSWORD) return { ok: false, error: makeError("WEAK_PASSWORD") };
+
+  const { error } = await supabaseClient.auth.updateUser({ password: newPassword });
+  if (error) return { ok: false, error: toFriendlyError(error, "NETWORK_ERROR") };
+  pending = null;
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Google — OAuth (el resultado llega por redirect → sesión).
+// ---------------------------------------------------------------------------
+
+export async function signInWithGoogle() {
+  if (!supabaseClient) return { ok: false, error: makeError("NETWORK_ERROR") };
+  try {
+    const { error } = await supabaseClient.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: window.location.origin },
+    });
+    if (error) return { ok: false, error: toFriendlyError(error, "NETWORK_ERROR") };
+    return { ok: true, status: "existing" };
+  } catch {
+    return { ok: false, error: makeError("NETWORK_ERROR") };
+  }
 }
 
 // -- Staff no vive aquí: sigue en authService mock (facade). --------

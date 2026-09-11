@@ -23,8 +23,8 @@ Ver `PLAN.md` para la auditoría original y el modelo de datos completo.
 - Dos sucursales (`branch_1`, `branch_2`) comparten la misma
   tarjeta/ciclo del cliente.
 
-Ver `tests/loyalty.test.mjs` para las 14 reglas verificadas (correr con
-`npm test`).
+Ver `tests/loyalty.test.mjs`, `tests/loyverse-sync.test.mjs` y
+`tests/auth.test.mjs` para las reglas verificadas (correr con `npm test`).
 
 ## Cómo correrlo
 
@@ -45,20 +45,37 @@ y login pasan a **Supabase Auth real** (ver sección de config debajo).
 
 ## Autenticación y sincronización con Loyverse
 
-Fase 1 (parcial): auth real de **cliente** sobre Supabase + vínculo
-automático con el cliente correcto de Loyverse, sin duplicados.
+Fase 1 (completa): auth real de **cliente** sobre Supabase Auth (correo o
+teléfono + contraseña), OTP **solo** como recuperación de contraseña, Google
+como opción de acceso, y vínculo automático con el cliente correcto de
+Loyverse, sin duplicados.
 
-- `identifyAccount` hace un *probe* anti-enumeración con
-  `signInWithOtp({ shouldCreateUser: false })`: sin error → cuenta
-  existente; "Signups not allowed for otp" → cuenta nueva. La UI ve
-  exactamente los mismos estados que el mock.
-- `completeRegistration` asegura la fila `customers` (con
-  `customer_code` `SC-XXXXXXXX` como token QR) y dispara la sincronización
-  Loyverse **solo a través de la Edge Function** — nunca directo.
+- `signUpWithEmail` → registro con **correo + contraseña** (el email es la
+  identidad; el teléfono es opcional: contacto + alias de login). Si el
+  proyecto tiene `email confirmations = on`, la cuenta queda pendiente hasta
+  confirmar desde el correo.
+- `signInWithPassword` → login con **correo o teléfono + contraseña**. El
+  teléfono se resuelve al email de la cuenta con la función segura
+  `resolve_email_for_login` (migración `0003`, SECURITY DEFINER) para no romper
+  RLS; la validación de la contraseña la hace SIEMPRE GoTrue (Supabase), nunca
+  esa función.
+- `forgotPasswordStart/Verify/Resend` + `setNewPassword` → recuperación por
+  **código al correo** (OTP). Sin proveedor SMS configurado, el código siempre
+  va al correo, incluso si pides la recuperación con tu teléfono.
+- `signInWithGoogle` → OAuth; la sesión llega por redirect
+  (`detectSessionInUrl`). Un correo ya registrado con contraseña no se pisa:
+  se reporta conflicto amigable y se invita a iniciar sesión con credenciales.
+- Cada alta de sesión asegura la fila `customers` (con `customer_code`
+  `SC-XXXXXXXX` como token QR) y dispara la sincronización Loyverse **solo a
+  través de la Edge Function** — nunca directo.
 - `retryLoyverseSync` re-dispara la sync desde el perfil/Home si quedó
   "failed" (banner "Reintentar sincronización" en modo real).
 - Staff y Admin siguen siendo mock en esta fase (su auth real es un paso
   posterior).
+
+Los errores de Supabase se traducen a mensajes amigables en español en
+`src/services/auth/authErrors.js` (códigos + frase); la UI nunca muestra
+errores crudos del servidor.
 
 ### Diagrama de flujo (clientes)
 
@@ -82,15 +99,18 @@ no es una `VITE_*` y necesariamente vive en la Edge Function.
    VITE_LOYVERSE_CUSTOMERS_FUNCTION_URL=   # opcional
    LOYVERSE_ACCESS_TOKEN=<token Loyverse con lectura/escritura>
    ```
-2. Aplica la migración `supabase/migrations/0001_customers.sql`
-   (`supabase db push` o pégalo en el SQL Editor).
+2. Aplica las migraciones `supabase/migrations/0001_customers.sql`,
+   `0002_loyalty_schema.sql` y `0003_auth_alias_rpc.sql`
+   (`supabase db push` o pégalas en el SQL Editor en orden).
 3. Despliega la Edge Function:
    ```
    supabase functions deploy loyverse-customers
    ```
    (variables `SUPABASE_URL`, `SUPABASE_ANON_KEY` y `LOYVERSE_ACCESS_TOKEN`
    configuradas en el proyecto — el token de Loyverse jamás en el frontend).
-4. En Auth providers habilita Email/Phone y (si quieres) Google + SMS.
+4. En Authentication → Providers habilita **Email** (y Google si quieres
+   acceso con OAuth). El proveedor **Phone/SMS queda apagado**: la
+   recuperación de contraseña usa el correo.
 
 Regla de la Edge Function (en `supabase/functions/_shared/loyverseCore.js`,
 probada unitariamente): busca por email → busca por teléfono (la API de
@@ -101,7 +121,9 @@ existe, con `customer_code` como nombre estable e idempotente.
 
 ## Credenciales de la demo
 
-- **Cliente:** `javier@example.com`.
+- **Cliente:** `javier@example.com` — contraseña `demo1234`.
+  También puedes entrar con el teléfono `+52 664 123 4567` + `demo1234`.
+  OTP de recuperación (demo): `123456` válido · `000000` vencido.
 - **Staff:** PIN `1234` (Ana Beltrán), `5678` (Marco Reyes) o `2468`
   (Luisa Padilla).
 - **Admin:** PIN `9999` (Diana Salazar) — el modo Admin en sí no pide
@@ -119,7 +141,8 @@ src/
   services/                motor de fidelización real; única puerta de
                             entrada a los datos; cada método es async
     index.js               BARREL ÚNICO — las pantallas importan SOLO desde aquí
-    auth/                  facade authService (Supabase real ↔ mock demo)
+    auth/                  facade authService (Supabase real ↔ mock demo) +
+                           authErrors (traducción de errores a mensajes amigables)
     loyalty/               loyaltyService + rewardService (reglas 8ª visita,
                             expiración, canje, cancelación)
     sales/                 salesService (único punto de entrada de ventas),
@@ -134,7 +157,8 @@ src/
   components/
     common/                ui, BrandMark, icons — piezas visuales puras
     layout/                BottomNav, QrModal, QrCode — estructura de pantalla
-    auth/                  piezas del flujo AuthScreen
+    auth/                  piezas del flujo AuthScreen (login/registro/
+                           recuperación por OTP/provisioning)
     loyalty/               StampTrack, SyncBanner — visuales de fidelización
   screens/client/          Home, Recompensas, Actividad, Perfil, Configuración
   screens/staff/           Home, Escanear, Cliente encontrado,
@@ -143,11 +167,13 @@ src/
   lib/
     supabase/client.js     ÚNICA creación del cliente Supabase (null en demo)
     utils/env.js           única lectura del entorno (Vite / tests)
+    phone.js               teléfonos E.164 +52 (normalización, validación)
     delay.js               util de pausa simulada
   App.jsx                  orquestador raíz + el selector de modo (dev-only)
   styles.css               identidad visual completa (paleta real del logo)
 tests/loyalty.test.mjs      suite del motor de fidelización (node --test)
 tests/loyverse-sync.test.mjs  lógica de sync Loyverse (normalización y conflicto)
+tests/auth.test.mjs         suite del flujo de auth (contraseña + recuperación OTP)
 ```
 
 ## Regla que gobierna todo el código
@@ -177,7 +203,7 @@ confirma Staff, nunca el cliente.
 |---|---|
 | Motor de fidelización (monto mínimo, límite diario, 8ª visita, expiración, cancelación/reversión, idempotencia) | Real, en `services/`, cubierto por tests |
 | Datos de lealtad (clientes, ventas, ciclos) | Mock, en memoria — se pierden al recargar la página |
-| Auth Cliente (identify → OTP → sesión persistente, Supabase) | Real, con `.env`; demo mock sin `.env` (facade `authService`) |
+| Auth Cliente (correo/teléfono + contraseña; OTP solo recuperación; Google; sesión persistente, Supabase) | Real, con `.env`; demo mock sin `.env` (facade `authService`) |
 | Perfil `customers` + `customer_code` | Real (Postgres, RLS) cuando está configurado |
 | Sync Loyverse (crear/vincular sin duplicar, con reintento y conflicto) | Real vía Edge Function; lógica probada en `tests/loyverse-sync.test.mjs` |
 | Auth Staff / Admin | Mock (PIN) |

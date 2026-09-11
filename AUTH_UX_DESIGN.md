@@ -1,174 +1,151 @@
-# Salmos Café — Identidad y Registro (UX/UI, sin implementación)
+# Salmos Café — Identidad, Registro y Recuperación (UX/UI)
 
-Diseño de la experiencia de Login/Registro de cliente. No toca código —
-`LoginScreen.jsx` y `authService.js` actuales quedan intactos hasta la
-siguiente etapa. Este documento es el contrato que seguirá esa
-implementación.
+Diseño de la experiencia de Login/Registro de cliente, **decidido con el
+socio**:
+
+- El login **primario** es **correo o teléfono + contraseña**.
+- El **OTP por correo** existe **solo para recuperar la contraseña**
+  (no es el método de login).
+- Google entra como alternativa; no requiriere pantalla propia.
+
+La implementación de esta fase está en `src/components/auth/` y
+`src/services/auth/` (ver `docs/AUTH_AND_LOYVERSE_FLOW.md` para el detalle
+técnico de contrato y Supabase).
 
 ---
 
 ## 1. Flujo completo
 
 Idea central: **una sola pantalla que cambia de estado**, no una serie de
-pantallas separadas para cada caso. El usuario nunca declara "soy nuevo"
-o "ya tengo cuenta" — Salmos lo determina.
+pantallas separadas.
 
 ```
-                         ┌─────────────────────┐
-                         │   ESTADO: identify    │
-                         │  (correo o teléfono   │
-                         │   + Continuar con     │
-                         │   Google)             │
-                         └──────────┬───────────┘
-                                    │
-              ┌─────────────────────┼─────────────────────┐
-              │ envía correo/tel     │                     │ toca Google
-              ▼                     │                      ▼
-     ┌──────────────────┐           │            ┌────────────────────┐
-     │ ESTADO: checking  │           │            │  Supabase OAuth     │
-     │ (loading breve,   │           │            │  (popup/redirect,   │
-     │  dentro del botón)│           │            │  fuera de la app)   │
-     └─────────┬─────────┘           │            └──────────┬──────────┘
-               │                     │                       │
-     lookup por identidad ───────────┘             vuelve con identidad
-               │                                    verificada de Google
-     ┌─────────┴─────────┐                                   │
-     │                   │                         ┌─────────┴─────────┐
-     ▼                   ▼                         │                   │
-┌──────────┐     ┌───────────────┐          identidad existe    identidad nueva
-│ EXISTENTE │     │     NUEVO      │                │                   │
-│           │     │                │                ▼                   ▼
-│ "Ya tienes│     │ "Vamos a crear │        ┌──────────────┐   ┌──────────────────┐
-│ una cuenta│     │  tu cuenta"    │        │ sesión activa │   │ ESTADO:           │
-│ en Salmos"│     │                │        │ → Home         │   │ google_confirm     │
-│           │     │ Nombre (+dato  │        └──────────────┘   │ (confirmar nombre, │
-│ ESTADO:   │     │ secundario     │                            │  teléfono opcional)│
-│ existing_ │     │ opcional)      │                            └─────────┬──────────┘
-│ verify    │     │                │                                      │
-│ (código)  │     │ ESTADO:        │                                      │
-└─────┬─────┘     │ new_details    │                                      │
-      │           └───────┬────────┘                                     │
-      │                   │                                              │
-      │           ┌───────┴────────┐                                     │
-      │           │ ESTADO:         │                                     │
-      │           │ new_verify      │                                     │
-      │           │ (mismo código   │                                     │
-      │           │  que existing)  │                                     │
-      │           └───────┬────────┘                                     │
-      │                   │                                              │
-      └─────────┬─────────┘                                              │
-                │                                                         │
-                ▼                                                         │
-      ┌───────────────────┐                                              │
-      │ ESTADO:             │◄─────────────────────────────────────────────┘
-      │ provisioning         │
-      │ "Estamos preparando  │
-      │ tu tarjeta Salmos"   │
-      └──────────┬──────────┘
-                 │
-                 ▼
-             Home (sesión activa)
+        ┌─────────────────────────────────────────────┐
+        │  ESTADO: login                               │
+        │  Correo o teléfono + Contraseña              │
+        │  [Iniciar sesión]  ·  ¿Olvidaste tu contraseña?│
+        │  ¿No tienes cuenta? Regístrate aquí          │
+        │  o  [Continuar con Google]                   │
+        └──────┬───────────────────────────┬───────────┘
+               │                           │
+       correo/tel +                        │ toca Google
+       contraseña                          ▼
+               │                   ┌──────────────────┐
+               ▼                   │ Supabase OAuth     │
+     ┌────────────────────┐        │ (redirect a       │
+     │ ESTADO: provisioning│        │  Google y de       │
+     │ (arma perfil Salmos │        │  vuelta a la app)  │
+     │  + client Loyverse) │        └─────────┬─────────┘
+     └─────────┬──────────┘                  │
+               │                      sesión lista → sesión activa
+               ▼                             (provisioning tmb aplica)
+            ┌──────────────────────┐
+            │  ¿Olvidaste?   │
+            ▼
+  ┌─────────────────────────────────────────────┐
+  │  ESTADO: reset_identifier                    │
+  │  Correo o teléfono → [Enviar código]         │
+  └──────────────────────┬──────────────────────┘
+                         ▼
+  ┌─────────────────────────────────────────────┐
+  │  ESTADO: reset_otp                          │
+  │  Código de 6 dígitos enviado al correo      │
+  └──────────────────────┬──────────────────────┘
+                         ▼
+  ┌─────────────────────────────────────────────┐
+  │  ESTADO: new_password                       │
+  │  Contraseña nueva + confirmación → [Guardar]│
+  └──────────────────────┬──────────────────────┘
+                         ▼
+                 vuelve a login con un aviso:
+                 "Contraseña actualizada. Entra con tu nueva contraseña."
 ```
 
-**Errores** no son pantallas nuevas: son un banner/inline dentro del
-estado activo (`identify`, `existing_verify`, `new_details`,
-`new_verify`, `google_confirm` o `provisioning`), más el caso especial de
-`session_expired`, que reabre `identify` con contexto. Ver §4.
+**Errores** no son pantallas nuevas: son banners inline dentro del estado
+activo (`login`, `register`, `reset_*`, `new_password` o `provisioning`),
+más el caso `session_expired`, que reabre `login` con contexto. Ver §4.
 
 ---
 
 ## 2. Pantallas necesarias
 
-Es **una sola pantalla real** (`AuthScreen`, evolución de `LoginScreen`)
-con seis estados internos. Se documenta cada estado como si fuera una
-pantalla porque UX/contenido cambia por completo, pero en código es un
-solo componente con una máquina de estados — así se cumple la
-recomendación de §5 de minimizar pantallas.
+Es **una sola pantalla real** (`AuthScreen`) con seis estados internos.
+La UI implementa `LoginForm`, `RegisterForm`, `ResetForm`,
+`OtpVerification`, `NewPasswordForm` y `ProvisioningState`, todos dentro
+del mismo layout.
 
-### 2.1 `identify` — Punto de entrada
+### 2.1 `login` — Punto de entrada
 
-- **Propósito:** capturar un identificador (correo o teléfono) o iniciar
-  Google, sin saber todavía si la cuenta existe.
-- **Campos:** un input que cambia de tipo con un selector pequeño
-  "Correo / Teléfono" (correo por default). Para teléfono, el input
-  incluye selector de país (+52 por default, dado el mercado de Salmos).
-- **Botones:** `Continuar` (primario, deshabilitado hasta que el campo
-  sea válido) · `Continuar con Google` (secundario) · enlace pequeño
-  para alternar Correo/Teléfono si no se usa el selector.
-- **Mensajes:** ninguno en reposo. "Bienvenido a Salmos Café" como
-  título; subtítulo breve ("Inicia sesión o crea tu cuenta en un
-  momento").
-- **Estados:** reposo → `checking` (spinner dentro de `Continuar`,
-  botón deshabilitado, sin bloquear el resto de la UI) → error inline
-  si el formato es inválido o si falla la verificación (ver §4).
-- **Siguiente paso:** según el resultado del lookup, transiciona a
-  `existing_verify`, `new_details`, o —vía Google— directo a sesión
-  activa o a `google_confirm`.
+- **Propósito:** entrar con el identificador de cuenta (correo o teléfono)
+  y la contraseña, o usar Google.
+- **Campos:** un único input de identificador (correo *o* teléfono, no hay
+  selector de método: el sistema distingue solo) + campo de contraseña.
+  Enlace "¿Olvidaste tu contraseña?" debajo.
+- **Botones:** `Iniciar sesión` (primario) · `Continuar con Google`
+  (secundario) · enlace "¿No tienes cuenta? Regístrate aquí".
+- **Mensajes:** "Entra a tu tarjeta" + subtítulo. En demo, caja de
+  credenciales de prueba.
+- **Siguiente paso:** credenciales correctas → `provisioning`; error →
+  banner inline (inválidas, correo sin confirmar con opción "Reenviar
+  correo", temporal).
 
-### 2.2 `existing_verify` — Usuario con cuenta
+### 2.2 `register` — Cuenta nueva
 
-- **Propósito:** confirmar que quien tiene el correo/teléfono es
-  realmente el dueño, mediante un código de un solo uso (ver
-  justificación del método en §5).
+- **Propósito:** crear cuenta con **correo + contraseña** (auth primaria).
+  El teléfono es **opcional**: es solo de contacto (avisos de la tarjeta) y
+  funciona como alias de login después.
+- **Campos:** **Nombre** · **Correo** · **Teléfono (opcional, +52)** ·
+  **Contraseña** (mínimo 8) · **Confirmar contraseña**.
+- **Mensajes de validación locales:** correo inválido, contraseña débil o
+  que no coincide, teléfono no mexicano (10 dígitos). Si el teléfono ya
+  pertenece a otra cuenta → banner con "Ir a iniciar sesión" (prellenando
+  ese teléfono).
+- **Siguiente paso:** correo válido → sesión lista (`provisioning`), o —
+  si Supabase requiere confirmación — mensaje "Revisa tu correo para
+  confirmar tu cuenta" y vuelve a `login` con un aviso.
+
+### 2.3 `reset_identifier` — "¿Olvidaste tu contraseña?"
+
+- **Propósito:** recuperar contraseña con un código por correo.
+- **Campos:** un input de identificador (correo o teléfono). El código
+  **siempre va al correo** (no hay SMS configurado; si pides con teléfono,
+  el sistema resuelve la cuenta y lo manda a su correo).
+- **Botones:** `Enviar código` (primario) · "Volver al inicio de sesión".
+- **Estado de error:** "No encontramos una cuenta con ese correo o
+  teléfono." (no revela si el correo existe para evitar enumeración).
+
+### 2.4 `reset_otp` — Código de un solo uso
+
+- **Propósito:** verificar la identidad del dueño de la cuenta.
 - **Campos:** input de 6 dígitos (`inputMode="numeric"`, auto-avance).
-- **Botones:** `Confirmar` (primario) · `Reenviar código` (secundario,
-  con cuenta regresiva de 30s) · `Usar otro método` (texto, regresa a
-  `identify` limpio).
-- **Mensajes:** "Ya tienes una cuenta en Salmos." + "Enviamos un código
-  a j\*\*\*@example.com" (correo/teléfono enmascarado, nunca completo).
-- **Estados:** `sending_code` (breve, al entrar) → reposo → `verifying`
-  (al confirmar) → error inline (código incorrecto/expirado, ver §4).
-- **Siguiente paso:** código correcto → sesión activa → Home
-  directamente (usuario existente no necesita `provisioning`).
+- **Botones:** `Confirmar` · `Reenviar código` (cuenta regresiva de 30s) ·
+  "Usar otro método" (regresa a `login` limpio).
+- **Mensajes:** "Enviamos un código a tu correo j\*\*\*@example.com"
+  (enmascarado, nunca completo).
+- **Errores:** código incorrecto · código vencido ("Este código venció.
+  Envía uno nuevo") · temporal.
 
-### 2.3 `new_details` — Usuario nuevo, datos mínimos
+### 2.5 `new_password` — Contraseña nueva
 
-- **Propósito:** recolectar solo lo indispensable antes de verificar.
-- **Campos:** el identificador ya capturado se muestra como texto fijo
-  (no editable aquí, ej. "Creando cuenta para **javier@example.com**").
-  `Nombre` (requerido). El dato de contacto secundario (teléfono si
-  entró por correo, o viceversa) se muestra como **opcional**, con
-  copy tipo "Teléfono (opcional) — para avisos importantes de tu
-  tarjeta".
-- **Botones:** `Continuar` (primario, requiere solo Nombre).
-- **Mensajes:** "Vamos a crear tu cuenta."
-- **Estados:** reposo → error inline si el dato secundario ya
-  pertenece a otra cuenta (caso 7/8, ver §4) → `checking`.
-- **Siguiente paso:** → `new_verify` (mismo componente de código que
-  `existing_verify`, reutilizado).
-
-### 2.4 `new_verify` — Verificación de usuario nuevo
-
-Mismo componente visual que `existing_verify`; cambia solo el copy de
-cabecera ("Confirma tu correo/teléfono para terminar") y el destino al
-completarse: → `provisioning` en vez de sesión directa, porque todavía
-falta crear el perfil Salmos.
-
-### 2.5 `google_confirm` — Confirmación ligera (solo Google + nuevo)
-
-- **Propósito:** Google ya entrega nombre y correo verificados: no hace
-  falta pedir nada obligatorio. Esta pantalla es una confirmación, no
-  un formulario.
-- **Campos:** nombre pre-llenado y editable (por si el nombre de Google
-  no es el que quiere usar en Salmos). Teléfono opcional.
-- **Botones:** `Confirmar y crear mi cuenta` (primario).
-- **Mensajes:** "Vamos a crear tu cuenta con estos datos de Google."
-- **Siguiente paso:** → `provisioning` (no requiere código: Google ya
-  verificó la identidad).
+- **Propósito:** definir la contraseña nueva (solo se llega con OTP
+  verificado; los servicios exigen ese orden).
+- **Campos:** contraseña nueva + confirmación (validación local ≥8 y
+  coincidencia).
+- **Botones:** `Guardar contraseña` · "Cancelar recuperación".
+- **Siguiente paso:** vuelve a `login` con aviso "Contraseña actualizada.
+  Entra con tu contraseña nueva."
 
 ### 2.6 `provisioning` — Transición final
 
-- **Propósito:** cubrir el trabajo detrás de escena (crear identidad en
-  Supabase, crear el customer/card de Salmos, y — más adelante —
-  buscar/crear el Customer en Loyverse) sin mostrar nada técnico.
-- **Campos/botones:** ninguno. Pantalla completa, sin acción del
-  usuario.
-- **Mensajes:** "Estamos preparando tu tarjeta Salmos." con un
-  subtítulo breve ("Esto toma solo un momento."). Nunca menciona
-  Supabase, Loyverse, API ni sincronización.
-- **Estados:** `working` (spinner) → éxito (avanza solo, sin
-  interacción) → error inline con `Reintentar` si algo falla (ver §4).
-- **Siguiente paso:** Home, con sesión ya activa.
+- **Propósito:** cubrir lo que ocurre detrás de escena al abrir sesión
+  (asegurar el perfil `customers`, sembrar la lealtad y vincular el
+  cliente de **Loyverse** vía Edge Function) sin mostrar nada técnico.
+- **Campos/botones:** ninguno; pantalla completa.
+- **Mensajes:** "Estamos preparando tu tarjeta Salmos" / "Esto toma solo
+  un momento". Nunca menciona Supabase, Loyverse ni API.
+- **Estados:** `working` (spinner) → éxito (avanza solo) → error con
+  `Reintentar` (no se pierde nada; la sesión se entrega igual aunque el
+  sync a Loyverse falle y el banner `SyncBanner` ofrece reintento).
 
 ---
 
@@ -176,90 +153,80 @@ falta crear el perfil Salmos.
 
 | Elemento actual | Decisión |
 |---|---|
-| `LoginScreen.jsx` | **Evoluciona**, no se descarta: su estructura (Wordmark + título + form + `Field`/`PrimaryButton`) es la base visual de `AuthScreen`. Cambia de "un formulario" a "una máquina de estados dentro del mismo layout". |
-| `authService.getSession/signOutClient` | **Se mantienen igual** — la sesión sigue siendo `{ customer } \| null`; nada de esto cambia con el nuevo flujo. |
-| `authService.signInClient({ email })` | **Se reemplaza** por el contrato nuevo de §5 (`identifyAccount`, `requestCode`, `verifyCode`, `signInWithGoogle`, `completeRegistration`) — ver nota técnica al final. |
-| `authIdentities` (mock) | **Se mantiene el concepto** (customer_id ↔ provider ↔ provider_id) — es exactamente el modelo que evita cuentas duplicadas y ya está en `PLAN.md`. |
-| `components/ui.jsx` (`Field`, `PrimaryButton`, `SecondaryButton`) | **Se reutilizan tal cual** para los inputs de código, nombre y teléfono. |
-| `BrandMark`, `.sc-login*` en `styles.css` | **Se reutilizan y se extienden** (nuevas clases para el selector Correo/Teléfono, el input de código, y el estado `provisioning` de pantalla completa) — sin tocar la identidad visual existente. |
-| Home / Rewards / Activity / Profile / QR / BottomNav | **Sin cambios.** Esta tarea termina exactamente donde hoy termina `LoginScreen`: al llamar `onSignedIn()`. |
-| Flujo de Staff/Admin | **Sin cambios** — esta tarea es exclusivamente el login de cliente. |
+| `Field`, `PrimaryButton`, `SecondaryButton` (`components/ui.jsx`) | **Se reutilizan** tal cual. |
+| `BrandMark`, `.sc-login*`, `.sc-phone-input`, `.sc-otp-row` en `styles.css` | **Se reutilizan y extienden** sin tocar la identidad visual existente. |
+| `authService.getSession/signOutClient/onSessionChange/retryLoyverseSync` | **Se mantienen igual** — la sesión sigue siendo `{ customer } \| null`. |
+| Contrato de auth del flujo OTP anterior | **Se reemplaza** por el contrato de contraseña de §7. |
+| `authIdentities` (mock) | **Se mantiene el concepto** (customer_id ↔ provider ↔ provider_id) para no duplicar cuentas. |
+| Google | **Solo como alternativa**, sin pantalla propia (`google_confirm` ya no existe): OAuth → sesión → provisioning. |
+| Home / Rewards / Activity / Profile / QR / BottomNav | **Sin cambios.** Esta tarea termina donde termina `AuthScreen`: al completar `onSignedIn()`. |
+| Flujo de Staff/Admin | **Sin cambios** — login de cliente únicamente. |
 
 ---
 
-## 4. Estados de autenticación
-
-Taxonomía completa, mapeada a los 15 casos que pediste cubrir.
+## 4. Estados de autenticación (taxonomía)
 
 | Estado | Cuándo ocurre | Qué ve el usuario | Caso(s) cubierto(s) |
 |---|---|---|---|
-| **loading** | Cualquier llamada en curso (`checking`, `sending_code`, `verifying`, `working`) | Spinner **dentro del control activo** (botón o pantalla), nunca un overlay bloqueante genérico | — |
-| **existing_account** | El lookup encuentra una identidad con ese correo/teléfono | "Ya tienes una cuenta en Salmos." → pasa a verificación | 1, 2, 3 |
-| **new_account** | El lookup no encuentra nada | "Vamos a crear tu cuenta." → pide nombre | 4, 5, 6 |
-| **verification** | Se envió un código (existente o nuevo) | Input de 6 dígitos + "Código enviado a…" + reenviar | 1, 2, 4, 5 |
-| **conflict** | El dato secundario en `new_details` ya pertenece a otra cuenta | Banner inline: "Este teléfono ya está en otra cuenta de Salmos. ¿Es tuya? [Iniciar sesión con ese teléfono] · [Usar otro]" — nunca fusiona cuentas en silencio | 7, 8 |
-| **cancelled** | El usuario cierra/navega fuera durante `new_details`, `new_verify` o `google_confirm` | No se crea ninguna cuenta parcial (nada se persiste hasta `provisioning`); al volver, arranca limpio en `identify` | 9, 14 |
-| **error_transient** | Falla de red/Supabase temporal | Banner inline "Algo salió mal. Intenta de nuevo." + botón `Reintentar`, el dato ya escrito no se pierde | 10 |
-| **error_code_invalid** | Código de 6 dígitos incorrecto | Input se marca en rojo, mensaje "Ese código no es correcto.", intentos limitados antes de forzar reenvío | 11 |
-| **error_code_expired** | Código vencido (ventana típica 5–10 min) | "Este código venció." + botón `Enviar uno nuevo` reemplaza al de confirmar | 12 |
-| **error_password** *(solo si se habilita contraseña como alternativa a código — ver nota en §5)* | Contraseña incorrecta | "Esa contraseña no es correcta." + enlace "¿La olvidaste?" | 13 |
-| **session_expired** | El usuario vuelve con un token vencido | `AuthScreen` se reabre directamente en `identify`, con un mensaje sutil arriba: "Tu sesión terminó, vuelve a entrar." — nunca un error agresivo | 15 |
-| **success** | Sesión creada/confirmada | Transición inmediata a Home (usuario existente) o a `provisioning` → Home (usuario nuevo) | — |
+| **loading** | Cualquier llamada en curso | Spinner dentro del control activo | — |
+| **login** | Entrada principal | Identificador + contraseña | 1–3, 15 |
+| **register** | Cuenta nueva | Nombre, correo, teléfono opcional, contraseña ×2 | 4, 5, 6 |
+| **conflict_phone** | El teléfono de registro ya pertenece a otra cuenta | Banner "Ese teléfono ya está asociado a otra cuenta." + "Ir a iniciar sesión" (prellena el teléfono) | 7, 8 |
+| **confirm_email** | Supabase pide confirmar el correo antes de entrar | "Revisa tu correo…" y vuelve a login con aviso | 4* (con confirmaciones on) |
+| **reset_identifier** | "¿Olvidaste tu contraseña?" | Correo o teléfono → código al correo | 12, 13 |
+| **reset_otp** | Código enviado | Input de 6 dígitos + reenviar | 13 |
+| **new_password** | OTP verificado | Contraseña nueva ×2 | 13 |
+| **error_transient** | Falla de red/Supabase temporal | Banner inline "Algo salió mal. Intenta de nuevo." + `Reintentar`, los datos no se pierden | 10 |
+| **error_credentials** | Credenciales inválidas | "Tu correo o contraseña no son correctos." | 11 |
+| **error_code_invalid/expired** | OTP incorrecto/vencido (recuperación) | Input en rojo / "Este código venció. Envía uno nuevo" | 11, 12 |
+| **session_expired** | Token vencido al volver | `AuthScreen` se reabre en `login` con "Tu sesión terminó, vuelve a entrar." | 15 |
+| **success** | Sesión lista | `provisioning` → Home | — |
 
 ---
 
-## 5. Recomendación final
+## 5. Recomendación final (decisión tomada)
 
-**Una pantalla, seis estados**, como se describe arriba — no seis
-pantallas. Esto ya minimiza la navegación: el usuario nunca "avanza" en
-un wizard con flechas de retroceso, solo ve el contenido cambiar en el
-mismo lugar.
+- **Contraseña como auth primaria** (correo o teléfono + contraseña), porque
+  el socio lo prefirió sobre el código cada vez.
+- **OTP por correo solo como recuperación de contraseña**, lo que elimina
+  las pantallas de "reestablecer cuenta" complicadas y usa los mecanismos
+  nativos de Supabase (`signInWithOtp` + `verifyOtp` + `updateUser`).
+- **Google sin pantalla propia**: el correo de Google llega verificado; si
+  ya existe una cuenta con ese correo se muestra conflicto amigable (no se
+  pisa nada).
+- **Una pantalla, seis estados** — el usuario nunca navega un wizard: el
+  contenido cambia en el mismo lugar.
 
-**Método de verificación recomendado: código de un solo uso (OTP) por
-correo o SMS, no contraseña.** Encaja mejor con "premium pero sencillo"
-(nadie recuerda una contraseña para su tarjeta de café), evita pantallas
-de "recuperar contraseña", y Supabase lo soporta de forma nativa tanto
-para email como para teléfono con la misma UI de código. Dejé definido
-el estado `error_password` en §4 por si el equipo decide ofrecer
-contraseña como alternativa más adelante, pero no es el default que
-recomiendo.
+---
 
-**Google se resuelve solo, sin pantalla propia** salvo el caso raro de
-usuario nuevo (`google_confirm`), y ahí es una confirmación de un
-campo, no un formulario.
+## 6. Nota técnica para el login por teléfono (RPC seguro)
 
-### Nota técnica para quien implemente Supabase (no es parte de esta entrega)
+El navegador no puede leer filas `customers` de otros usuarios (RLS). Para
+"entrar con teléfono", el frontend llama a la función **servidor**
+`resolve_email_for_login` (migración `0003`, SECURITY DEFINER), que
+devuelve el correo de la cuenta **solo si hay una coincidencia única** por
+dígitos. La contraseña la valida siempre Supabase Auth. Para más detalle y
+riesgos de configuración remota ver `docs/AUTH_AND_LOYVERSE_FLOW.md`.
 
-Un diseño ingenuo de "primero pregunto si el correo existe, luego
-decido qué mostrar" **no se puede implementar tal cual con Supabase
-Auth**: por diseño, Supabase no expone un endpoint que confirme "este
-correo ya tiene cuenta" (es una protección contra enumeración de
-usuarios). En la práctica, `identifyAccount` del diagrama de arriba se
-implementará enviando el código primero (`signInWithOtp` con
-`shouldCreateUser: false` para probar existencia sin crear nada) y
-usando el resultado de esa llamada para decidir `existing_verify` vs.
-`new_details` — el usuario no nota la diferencia, pero la secuencia
-técnica interna no es un "lookup" separado como sugiere el diagrama
-conceptual. Lo dejo anotado para que el siguiente agente no lo
-descubra a medio camino.
+---
 
-### Contrato de servicio esperado (para diseñar, no para programar ahora)
+## 7. Contrato de servicio (implementado)
 
 ```text
-authService.identifyAccount({ email? , phone? })
-  → { status: "existing" | "new", maskedContact }
-
-authService.requestCode({ email?, phone?, forNewAccount: boolean })
-authService.verifyCode({ code })
-  → { ok, session } | { ok:false, error: "invalid" | "expired" }
-
+authService.signUpWithEmail({ email, password, name?, phone? })
+  → { ok, mode: "complete" | "confirm_email" }
+authService.signInWithPassword({ identifier, password })   // correo o teléfono
+  → { ok } | { ok:false, error:{ code, message } }
+authService.forgotPasswordStart({ identifier })            // código → correo
+authService.forgotPasswordVerify({ code })
+authService.forgotPasswordResend()
+authService.setNewPassword({ newPassword })
 authService.signInWithGoogle()
-  → { status: "existing"|"new", session? , googleProfile? }
-
-authService.completeRegistration({ name, secondaryContact? , googleProfile? })
-  → dispara "provisioning": crea auth identity + customer + card
-  → { ok, session } | { ok:false, error }
+authService.checkSecondaryContact({ method, value })
+authService.resendConfirmationEmail({ email })
+authService.getSession() / onSessionChange() / signOutClient() / retryLoyverseSync()
 ```
 
-Esto reemplaza a `signInClient` tal como existe hoy; `getSession` y
-`signOutClient` no cambian.
+Los errores son `{ code, message }` con frases en español definidas en
+`src/services/auth/authErrors.js`; el contrato es idéntico en el mock y en
+la implementación real (facade `src/services/auth/authService.js`).

@@ -1,166 +1,156 @@
 import React, { useState } from "react";
 import { Wordmark } from "../common/BrandMark.jsx";
-import { AuthIdentifierForm } from "./AuthIdentifierForm.jsx";
+import { LoginForm } from "./LoginForm.jsx";
+import { RegisterForm } from "./RegisterForm.jsx";
+import { ResetForm } from "./ResetForm.jsx";
 import { OtpVerification } from "./OtpVerification.jsx";
-import { NewAccountForm } from "./NewAccountForm.jsx";
-import { GoogleConfirmation } from "./GoogleConfirmation.jsx";
+import { NewPasswordForm } from "./NewPasswordForm.jsx";
 import { ProvisioningState } from "./ProvisioningState.jsx";
 import { authService } from "../../services/index.js";
+import { makeError } from "../../services/auth/authErrors.js";
 
 // ---------------------------------------------------------------
 // AuthScreen — un solo layout, una máquina de estados explícita.
-// Reemplaza a LoginScreen. Ver AUTH_UX_DESIGN.md para el flujo
-// completo; este componente es su implementación literal.
+// Ver AUTH_UX_DESIGN.md para el flujo completo.
 //
-// Estados: identify | existing_verify | new_details | new_verify |
-//          google_confirm | provisioning
+// Estados:
+//   login            → correo/teléfono + contraseña (entrada principal)
+//   register         → nombre + correo + contraseña (+ teléfono opcional)
+//   reset_identifier → "¿Olvidaste tu contraseña?" (correo o teléfono)
+//   reset_otp        → código enviado al correo (OTP solo como recuperación)
+//   new_password     → contraseña nueva (tras verificar el código)
+//   provisioning     → la sesión ya existe; App arma perfil + Loyverse
 // ---------------------------------------------------------------
 export function AuthScreen({ onSignedIn, sessionExpired }) {
-  const [authState, setAuthState] = useState("identify");
+  const [authState, setAuthState] = useState("login");
   const [loading, setLoading] = useState(false);
-  const [identifyError, setIdentifyError] = useState(null);
-  const [newDetailsError, setNewDetailsError] = useState(null);
-  const [contact, setContact] = useState(null); // { method, value, maskedContact }
-  const [newAccountDraft, setNewAccountDraft] = useState(null); // { name, secondaryContact }
-  const [googleProfile, setGoogleProfile] = useState(null);
-  const [googleDraft, setGoogleDraft] = useState(null); // { name, secondaryContact } — para poder reintentar sin perder lo que el usuario escribió
+  const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(sessionExpired ? "Tu sesión terminó, vuelve a entrar." : null);
+  const [maskedContact, setMaskedContact] = useState(null);
+  const [loginInitialIdentifier, setLoginInitialIdentifier] = useState(null);
   const [provisioningStatus, setProvisioningStatus] = useState("working");
-  const [notice, setNotice] = useState(
-    sessionExpired ? "Tu sesión terminó, vuelve a entrar." : null
-  );
 
-  function resetToIdentify() {
+  function resetToLogin(prefillIdentifier) {
     authService.cancelPending();
-    setAuthState("identify");
-    setContact(null);
-    setNewAccountDraft(null);
-    setGoogleProfile(null);
-    setGoogleDraft(null);
-    setIdentifyError(null);
-    setNewDetailsError(null);
+    setAuthState("login");
+    setError(null);
+    setNotice(null);
+    setMaskedContact(null);
+    setLoginInitialIdentifier(prefillIdentifier || null);
   }
 
-  // --- identify ---------------------------------------------------------
-  async function handleIdentified({ method, value }) {
-    setLoading(true);
-    setIdentifyError(null);
-    setNotice(null);
-    setGoogleProfile(null);
-    setGoogleDraft(null);
+  async function enterProvisioning(nextStateOnFailure, failureError) {
+    setAuthState("provisioning");
+    setProvisioningStatus("working");
+    const provisioned = await onSignedIn();
+    if (provisioned) return; // App ya montó la app de cliente.
+    // La sesión no quedó lista: regresa al estado anterior sin quedarte pegado.
+    setProvisioningStatus("error");
+    setAuthState(nextStateOnFailure);
+    setError(failureError || makeError("NETWORK_ERROR"));
+  }
 
-    const res = await authService.identifyAccount({ method, value });
+  // --- login ---------------------------------------------------------
+  async function handleLogin({ identifier, password }) {
+    setLoading(true);
+    setError(null);
+    setNotice(null);
+    const res = await authService.signInWithPassword({ identifier, password });
+    setLoading(false);
     if (!res.ok) {
-      setLoading(false);
-      setIdentifyError(res.error);
+      setError(res.error);
       return;
     }
-    setContact(res);
-
-    if (res.status === "existing") {
-      const codeRes = await authService.requestCode({ method, value, forNewAccount: false });
-      setLoading(false);
-      if (!codeRes.ok) {
-        setIdentifyError(codeRes.error);
-        return;
-      }
-      setAuthState("existing_verify");
-    } else {
-      setLoading(false);
-      setAuthState("new_details");
-    }
+    await enterProvisioning("login", null);
   }
 
+  async function handleResendConfirmation(identifier) {
+    setLoading(true);
+    await authService.resendConfirmationEmail({ email: identifier });
+    setLoading(false);
+    setError(null);
+    setNotice("Te reenviamos el correo de confirmación. Revisa tu bandeja de entrada.");
+  }
+
+  // --- register -------------------------------------------------------
+  async function handleRegister(details) {
+    setLoading(true);
+    setError(null);
+    setNotice(null);
+    const res = await authService.signUpWithEmail(details);
+    setLoading(false);
+    if (!res.ok) {
+      setError(res.error);
+      return;
+    }
+    if (res.mode === "confirm_email") {
+      setNotice("Revisa tu correo: te enviamos un enlace para confirmar tu cuenta. Después ya podrás iniciar sesión.");
+      setAuthState("login");
+      return;
+    }
+    await enterProvisioning("login", null);
+  }
+
+  // --- google ----------------------------------------------------------
   async function handleGoogle() {
     setLoading(true);
-    setIdentifyError(null);
+    setError(null);
     setNotice(null);
-    setNewAccountDraft(null);
-    setContact(null);
     const res = await authService.signInWithGoogle();
     setLoading(false);
     if (!res.ok) {
-      setIdentifyError(res.error);
+      setError(res.error);
       return;
     }
-    if (res.status === "existing") {
-      onSignedIn();
-      return;
+    // En modo real el navegador redirige a Google; la sesión llega sola por
+    // onSessionChange/detectSessionInUrl. En demo el mock ya dejó la sesión.
+    if (authService.isDemoMode) {
+      await enterProvisioning("login", null);
     }
-    setGoogleProfile(res.googleProfile);
-    setAuthState("google_confirm");
   }
 
-  // --- new_details --------------------------------------------------------
-  async function handleNewDetailsContinue({ name, secondaryContact }) {
-    setNewAccountDraft({ name, secondaryContact });
+  // --- reset (recuperación de contraseña por OTP al correo) -----------
+  async function handleResetStart({ identifier }) {
     setLoading(true);
-    setNewDetailsError(null);
-    const codeRes = await authService.requestCode({ method: contact.method, value: contact.value, forNewAccount: true });
+    setError(null);
+    const res = await authService.forgotPasswordStart({ identifier });
     setLoading(false);
-    if (!codeRes.ok) {
-      setNewDetailsError(codeRes.error);
+    if (!res.ok) {
+      setError(res.error);
       return;
     }
-    setAuthState("new_verify");
+    setMaskedContact(res.maskedContact);
+    setAuthState("reset_otp");
   }
 
-  // --- conflicto: "entrar con ese contacto" desde new_details/google_confirm ---
-  function handleResolveConflictAsLogin({ method, value }) {
-    authService.cancelPending();
-    setNewAccountDraft(null);
-    setGoogleProfile(null);
-    handleIdentified({ method, value });
-  }
-
-  // --- OTP (compartido por existing_verify y new_verify) ---
-  async function handleVerify(code) {
-    const res = await authService.verifyCode({ code });
+  async function handleResetVerify(code) {
+    const res = await authService.forgotPasswordVerify({ code });
     if (!res.ok) return res;
-
-    if (res.mode === "existing") {
-      onSignedIn();
-      return res;
-    }
-
-    // Nuevo usuario verificado → crear cuenta.
-    setAuthState("provisioning");
-    setProvisioningStatus("working");
-    const provRes = await authService.completeRegistration({
-      name: newAccountDraft.name,
-      secondaryContact: newAccountDraft.secondaryContact,
-    });
-    setProvisioningStatus(provRes.ok ? "working" : "error");
-    if (provRes.ok) onSignedIn();
+    setMaskedContact(null);
+    setAuthState("new_password");
     return res;
   }
 
-  async function handleResend() {
-    await authService.resendCode();
+  async function handleResetResend() {
+    await authService.forgotPasswordResend();
   }
 
-  // --- google_confirm -------------------------------------------------------
-  async function handleGoogleConfirm({ name, secondaryContact }) {
-    setGoogleDraft({ name, secondaryContact });
-    setAuthState("provisioning");
-    setProvisioningStatus("working");
-    const res = await authService.completeRegistration({ name, secondaryContact, googleProfile });
-    setProvisioningStatus(res.ok ? "working" : "error");
-    if (res.ok) onSignedIn();
-  }
-
-  // --- provisioning: reintentar ---
-  function handleRetryProvisioning() {
-    if (googleDraft) {
-      handleGoogleConfirm(googleDraft);
-    } else if (newAccountDraft) {
-      setProvisioningStatus("working");
-      authService
-        .completeRegistration({ name: newAccountDraft.name, secondaryContact: newAccountDraft.secondaryContact })
-        .then((res) => {
-          setProvisioningStatus(res.ok ? "working" : "error");
-          if (res.ok) onSignedIn();
-        });
+  async function handleSetNewPassword({ newPassword }) {
+    setLoading(true);
+    setError(null);
+    const res = await authService.setNewPassword({ newPassword });
+    setLoading(false);
+    if (!res.ok) {
+      setError(res.error);
+      return;
     }
+    resetToLogin(null);
+    setNotice("Contraseña actualizada. Entra con tu contraseña nueva.");
+  }
+
+  // --- provisioning: reintentar ---------------------------------------
+  function handleRetryProvisioning() {
+    enterProvisioning("login", null);
   }
 
   return (
@@ -168,54 +158,65 @@ export function AuthScreen({ onSignedIn, sessionExpired }) {
       {authState !== "provisioning" && <Wordmark on="cream" className="sc-login__wordmark" />}
       {notice && <p className="sc-auth-notice">{notice}</p>}
 
-      {authState === "identify" && (
-        <AuthIdentifierForm
-          onIdentified={handleIdentified}
+      {authState === "login" && (
+        <LoginForm
+          key={loginInitialIdentifier || "login"}
+          initialIdentifier={loginInitialIdentifier || undefined}
+          onLogin={handleLogin}
+          onGoToRegister={() => {
+            authService.cancelPending();
+            setError(null);
+            setAuthState("register");
+          }}
+          onForgotPassword={() => {
+            setError(null);
+            setAuthState("reset_identifier");
+          }}
           onGoogle={handleGoogle}
-          error={identifyError}
+          onResendConfirmation={handleResendConfirmation}
+          error={error}
           loading={loading}
-          onDismissError={() => setIdentifyError(null)}
+          onDismissError={() => setError(null)}
         />
       )}
 
-      {authState === "existing_verify" && (
+      {authState === "register" && (
+        <RegisterForm
+          onRegister={handleRegister}
+          onBack={(prefillIdentifier) => resetToLogin(prefillIdentifier)}
+          error={error}
+          loading={loading}
+          onDismissError={() => setError(null)}
+        />
+      )}
+
+      {authState === "reset_identifier" && (
+        <ResetForm
+          onStart={handleResetStart}
+          onBack={() => resetToLogin(null)}
+          error={error}
+          loading={loading}
+          onDismissError={() => setError(null)}
+        />
+      )}
+
+      {authState === "reset_otp" && (
         <OtpVerification
-          title="Ya tienes una cuenta en Salmos."
-          maskedContact={contact.maskedContact}
-          onVerify={handleVerify}
-          onResend={handleResend}
-          onUseAnotherMethod={resetToIdentify}
+          title="Recuperar contraseña"
+          subtitle={`Enviamos un código a tu correo ${maskedContact || ""}`}
+          onVerify={handleResetVerify}
+          onResend={handleResetResend}
+          onUseAnotherMethod={() => resetToLogin(null)}
         />
       )}
 
-      {authState === "new_details" && (
-        <NewAccountForm
-          primaryMethod={contact.method}
-          primaryValue={contact.value}
-          onContinue={handleNewDetailsContinue}
-          onResolveConflictAsLogin={handleResolveConflictAsLogin}
+      {authState === "new_password" && (
+        <NewPasswordForm
+          onSubmit={handleSetNewPassword}
+          onCancel={() => resetToLogin(null)}
+          error={error}
           loading={loading}
-          transientError={newDetailsError}
-        />
-      )}
-
-      {authState === "new_verify" && (
-        <OtpVerification
-          title="Confirma tu cuenta"
-          subtitle={`Confirma tu ${contact.method === "email" ? "correo" : "teléfono"} para terminar — enviamos un código a ${contact.maskedContact}`}
-          maskedContact={contact.maskedContact}
-          onVerify={handleVerify}
-          onResend={handleResend}
-          onUseAnotherMethod={resetToIdentify}
-        />
-      )}
-
-      {authState === "google_confirm" && (
-        <GoogleConfirmation
-          googleProfile={googleProfile}
-          onConfirm={handleGoogleConfirm}
-          onResolveConflictAsLogin={handleResolveConflictAsLogin}
-          loading={loading}
+          onDismissError={() => setError(null)}
         />
       )}
 

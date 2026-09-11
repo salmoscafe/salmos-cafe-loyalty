@@ -1,16 +1,15 @@
 import React, { useEffect, useRef, useState } from "react";
 import { AuthMessage } from "./AuthMessage.jsx";
 import { PrimaryButton, SecondaryButton } from "../common/ui.jsx";
+import { authService } from "../../services/index.js";
 
 const LENGTH = 6;
 const RESEND_SECONDS = 30;
 
-// Componente OTP reutilizable — lo usan tanto existing_verify como
-// new_verify (mismo componente, distinto copy alrededor).
-//
-// Convención de prueba en esta etapa mock (ver authService.js):
-// "123456" siempre es válido · "000000" siempre simula vencido ·
-// cualquier otro valor de 6 dígitos simula "código incorrecto".
+// Componente OTP reutilizable — lo usa la recuperación de contraseña.
+// Los servicios devuelven errores { code } ya mapeados:
+// "OTP_EXPIRED" → vencido · "NETWORK_ERROR" → temporal · otro → inválido.
+// En modo demo (mock) el código "123456" siempre es válido.
 export function OtpVerification({ title, subtitle, maskedContact, onVerify, onResend, onUseAnotherMethod }) {
   const [digits, setDigits] = useState(Array(LENGTH).fill(""));
   const [status, setStatus] = useState("idle"); // idle | verifying | invalid | expired | transient
@@ -68,7 +67,8 @@ export function OtpVerification({ title, subtitle, maskedContact, onVerify, onRe
     setStatus("verifying");
     const res = await onVerify(code);
     if (res?.ok) return; // AuthScreen se encarga de la transición
-    setStatus(res?.error === "expired" ? "expired" : res?.error === "transient" ? "transient" : "invalid");
+    const errorCode = res?.error?.code;
+    setStatus(errorCode === "OTP_EXPIRED" ? "expired" : errorCode === "NETWORK_ERROR" ? "transient" : "invalid");
     setDigits(Array(LENGTH).fill(""));
     inputsRef.current[0]?.focus();
   }
@@ -137,7 +137,9 @@ export function OtpVerification({ title, subtitle, maskedContact, onVerify, onRe
         </button>
       </div>
 
-      <p className="sc-login__demo-hint">Prueba: 123456 válido · 000000 vencido · otro = incorrecto</p>
+      {authService.isDemoMode && (
+        <p className="sc-login__demo-hint">Código de prueba (demo): 123456 válido · 000000 vencido · otro = incorrecto</p>
+      )}
     </div>
   );
 }

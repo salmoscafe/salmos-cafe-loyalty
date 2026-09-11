@@ -851,6 +851,11 @@ customers
 audit_logs
 ```
 
+En la base real estas tablas se crean con las migraciones
+`supabase/migrations/0001_customers.sql` (customers + customer_sync_events
++ RLS), `0002_loyalty_schema.sql` (ciclos/visitas/recompensas/auditoría +
+RLS) y `0003_auth_alias_rpc.sql` (resolución de login por teléfono).
+
 ### `customer_sync_events`
 
 Esta tabla ya forma parte de la arquitectura actual y sirve para
@@ -963,6 +968,32 @@ App Salmos
 
 Loyverse solamente participa cuando necesitamos sincronizar información
 relacionada con el POS.
+
+### Login por teléfono (alias → email)
+
+El navegador no puede leer filas de `customers` ajenas (RLS), así que para
+entrar con teléfono se resuelve el correo de la cuenta mediante el RPC
+seguro `resolve_email_for_login` (migración `0003`, `SECURITY DEFINER`,
+`search_path` fijo, grants solo a `anon`/`authenticated`):
+
+``` sql
+-- La app normaliza a E.164 (+52…) ANTES de llamar al RPC
+-- (phoneIdentifierForLogin en supabaseAuthService.js): "6641234567" → "+526641234567".
+select public.resolve_email_for_login('+526641234567');
+```
+
+- Devuelve el email **solo si hay UNA coincidencia exacta** por dígitos
+  de teléfono (o por email); ambigüedad o no-encontrado → `NULL`, y la UI
+  invita a usar el correo.
+- Nunca valida contraseñas ni expone teléfonos/filas: esa validación la
+  hace **siempre** Supabase Auth.
+- Pre-chequeo de registro (`checkSecondaryContact`): la migración `0003` añade
+  `phone_is_registered(p_phone)` — `SECURITY DEFINER`, devuelve **solo**
+  `true|false` de existencia por dígitos (sin email ni filas). RLS de
+  `customers` sigue intacta y el anon no puede hacer SELECT.
+- Riesgo aceptado (H2): `anon` puede invocar `resolve_email_for_login`
+  (teléfono → email). Mitigación futura: resolver+login en una Edge Function
+  y rate limiting/CAPTCHA — ver `docs/AUTH_AND_LOYVERSE_FLOW.md`.
 
 ------------------------------------------------------------------------
 

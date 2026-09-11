@@ -1,18 +1,22 @@
 // ---------------------------------------------------------------
-// authService — FACADE. Mismo contrato público que la UI ya consume
+// authService — FACADE. Mismo contrato público que la UI consume
 // (AuthScreen y compañía), con dos implementaciones intercambiables:
 //
-//   * Sin Supabase configurado → MOCK en memoria (modo demo/dev),
-//     seed del proyecto original.
+//   * Sin Supabase configurado → MOCK en memoria (modo demo/dev).
 //   * Con VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY → implementación
 //     real sobre Supabase Auth (`./auth/supabaseAuthService.js`).
 //
-// La UI nunca sabe cuál implementación está corriendo. Tampoco cambia
-// el contrato: identifyAccount/requestCode/verifyCode/... son iguales
-// en ambos casos.
+// Contrato (igual en ambas):
+//   * signUpWithEmail / signInWithPassword  ← contraseña como auth principal
+//       (identificador = correo o teléfono).
+//   * forgotPasswordStart/Verify/Resend + setNewPassword ← OTP SOLO como
+//       recuperación de contraseña.
+//   * signInWithGoogle ← OAuth (el resultado llega vía redirect/sesión).
+//   * checkSecondaryContact / resendConfirmationEmail.
+//   * Sesión: getSession / onSessionChange / signOutClient / retryLoyverseSync.
 //
 // Staff y Admin siguen siendo mock en esta fase (su auth real es un
-// paso posterior), sin importar el modo — por eso se delega siembre a
+// paso posterior), sin importar el modo — por eso se delega siempre a
 // la implementación mock.
 // ---------------------------------------------------------------
 
@@ -29,17 +33,22 @@ const pick = (name) =>
 
 // --- Cliente (Supabase real o mock) ------------------------------------
 export const getSession = pick("getSession");
-export const signOutClient = pick("signOutClient");
-export const identifyAccount = pick("identifyAccount");
-export const requestCode = pick("requestCode");
-export const verifyCode = pick("verifyCode");
-export const resendCode = pick("resendCode");
-export const cancelPending = mock.cancelPending; // síncrono, idéntico en ambos
-export const checkSecondaryContact = pick("checkSecondaryContact");
-export const signInWithGoogle = pick("signInWithGoogle");
-export const completeRegistration = pick("completeRegistration");
 export const onSessionChange = pick("onSessionChange");
+export const signOutClient = pick("signOutClient");
 export const retryLoyverseSync = pick("retryLoyverseSync");
+
+export const signUpWithEmail = pick("signUpWithEmail");
+export const signInWithPassword = pick("signInWithPassword");
+export const checkSecondaryContact = pick("checkSecondaryContact");
+export const resendConfirmationEmail = pick("resendConfirmationEmail");
+
+export const forgotPasswordStart = pick("forgotPasswordStart");
+export const forgotPasswordVerify = pick("forgotPasswordVerify");
+export const forgotPasswordResend = pick("forgotPasswordResend");
+export const setNewPassword = pick("setNewPassword");
+export const cancelPending = pick("cancelPending"); // síncrono, idéntico en ambos
+
+export const signInWithGoogle = pick("signInWithGoogle");
 
 // Dev flags — en modo real son no-ops; solo existen para la demo mock.
 export const devSetForceTransientError = mock.devSetForceTransientError;

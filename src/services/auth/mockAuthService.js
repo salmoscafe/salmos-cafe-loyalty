@@ -1,4 +1,5 @@
 import { delay } from "../../lib/delay.js";
+import { phoneDigits, toE164Mx } from "../../lib/phone.js";
 import {
   customers,
   authIdentities,
@@ -7,6 +8,7 @@ import {
   generateId,
   logAudit,
 } from "../../data/mockDatabase.js";
+import { makeError } from "./authErrors.js";
 
 // ---------------------------------------------------------------
 // authService (implementación MOCK) — simula sesión e identidad en
@@ -15,19 +17,33 @@ import {
 // configurado (modo demo/dev). En producción real usa
 // `./supabaseAuthService.js`.
 //
-// NOTA TÉCNICA: `identifyAccount` aquí es un lookup directo por
-// simplicidad de mock. Supabase Auth NO expone "¿existe este
-// correo?" como consulta directa (protección anti-enumeración) — en
-// producción esa determinación se hace disparando
-// signInWithOtp({shouldCreateUser:false}) y leyendo el resultado.
+// Contrato IDÉNTICO al real (password como auth principal, OTP solo
+// como recuperación). Con este mock puedes probar el flujo completo
+// sin red:
+//   * Cuentas de prueba: javier@example.com / maria.lopez@example.com
+//     con contraseña "demo1234" (o su teléfono + demo1234).
+//   * Registro nuevo: quedará con sesión inmediata (modo "complete").
+//   * OTP de recuperación: "123456" siempre es válido,
+//     "000000" simula un código vencido.
 // ---------------------------------------------------------------
 
 let session = { customerId: null };
 let staffSession = { staffId: null };
 
-// Verificación pendiente (identify → código enviado → verificar).
-// Vive en memoria porque es un solo flujo a la vez en esta demo.
+// Recuperación de contraseña en curso.
 let pending = null;
+
+// "Base de datos" de credenciales del mock. Un customer tiene un email
+// (su identificador de login) y opcionalmente un teléfono E.164.
+// En el mock la contraseña vive en claro (no es un sistema real).
+const accounts = [
+  { customerId: "cus_1", email: "javier@example.com", password: "demo1234" },
+  { customerId: "cus_2", email: "maria.lopez@example.com", password: "demo1234" },
+];
+
+const DEMO_OTP = "123456";
+const MIN_PASSWORD = 8;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // --- Flags SOLO para pruebas manuales en esta etapa mock. --------------
 let devForceTransientErrorOnce = false;
@@ -48,6 +64,37 @@ function maybeFailTransiently() {
   return false;
 }
 
+// -------------------------------------------------------------------
+
+function customerPhone(customerId) {
+  const customer = customers.find((c) => c.id === customerId);
+  return customer?.phone ? toE164Mx(customer.phone) || customer.phone : null;
+}
+
+function findAccount(identifier) {
+  const idn = String(identifier || "").trim();
+  if (!idn) return null;
+  if (idn.includes("@")) {
+    return accounts.find((a) => a.email === idn.toLowerCase()) || null;
+  }
+  const targetDigits = toE164Mx(idn) ? phoneDigits(toE164Mx(idn)) : phoneDigits(idn);
+  if (!targetDigits) return null;
+  return accounts.find((a) => phoneDigits(customerPhone(a.customerId) || "") === targetDigits) || null;
+}
+
+function maskContact(method, value) {
+  if (method === "email") {
+    const [user, domain] = value.split("@");
+    if (!domain) return value;
+    const visible = user.slice(0, 1);
+    return `${visible}${"*".repeat(Math.max(user.length - 1, 2))}@${domain}`;
+  }
+  const digits = value.replace(/\D/g, "");
+  return `••• •••${digits.slice(-2)}`;
+}
+
+// -------------------------------------------------------------------
+// Sesión.
 // -------------------------------------------------------------------
 
 export async function getSession() {
@@ -72,157 +119,29 @@ export async function retryLoyverseSync() {
   return { ok: true, status: "skipped" };
 }
 
-function normalizePhone(value) {
-  return value.replace(/\D/g, "");
-}
-
-function findIdentity(method, value) {
-  if (method === "phone") {
-    const target = normalizePhone(value);
-    return authIdentities.find((i) => i.provider === "phone" && normalizePhone(i.providerId) === target);
-  }
-  const normalized = value.trim().toLowerCase();
-  return authIdentities.find((i) => i.provider === method && i.providerId.toLowerCase() === normalized);
-}
-
-function maskContact(method, value) {
-  if (method === "email") {
-    const [user, domain] = value.split("@");
-    if (!domain) return value;
-    const visible = user.slice(0, 1);
-    return `${visible}${"*".repeat(Math.max(user.length - 1, 2))}@${domain}`;
-  }
-  // teléfono: se muestran solo los últimos 2 dígitos.
-  const digits = value.replace(/\D/g, "");
-  return `••• •••${digits.slice(-2)}`;
-}
-
-// 1) identify — ¿esta cuenta ya existe?
-export async function identifyAccount({ method, value }) {
-  await delay(450);
-  if (maybeFailTransiently()) return { ok: false, error: "transient" };
-
-  const identity = findIdentity(method, value);
-  return {
-    ok: true,
-    status: identity ? "existing" : "new",
-    method,
-    value,
-    maskedContact: maskContact(method, value),
-  };
-}
-
-// 2) requestCode — "envía" el código (mock: siempre 123456).
-export async function requestCode({ method, value, forNewAccount }) {
-  await delay(500);
-  if (maybeFailTransiently()) return { ok: false, error: "transient" };
-
-  const identity = findIdentity(method, value);
-  pending = {
-    mode: forNewAccount ? "new" : "existing",
-    method,
-    value,
-    code: "123456",
-    expiresAt: Date.now() + 5 * 60 * 1000,
-    customerId: identity ? identity.customerId : null,
-    verified: false,
-  };
-  return { ok: true, maskedContact: maskContact(method, value) };
-}
-
-// 3) verifyCode — valida el código de un solo uso.
-// Convención de prueba (solo mock): "123456" siempre es válido,
-// "000000" siempre simula un código vencido.
-export async function verifyCode({ code }) {
-  await delay(500);
-  if (!pending) return { ok: false, error: "no_pending" };
-  if (maybeFailTransiently()) return { ok: false, error: "transient" };
-
-  if (code === "000000" || Date.now() > pending.expiresAt) {
-    return { ok: false, error: "expired" };
-  }
-  if (code !== pending.code) {
-    return { ok: false, error: "invalid" };
-  }
-
-  if (pending.mode === "existing") {
-    session = { customerId: pending.customerId };
-    logAudit({ actorId: pending.customerId, actorRole: "customer", action: "CUSTOMER_SIGNED_IN" });
-    pending = null;
-    return { ok: true, mode: "existing" };
-  }
-
-  // Nuevo usuario: solo marcamos el contacto como verificado.
-  // La cuenta se crea en completeRegistration().
-  pending.verified = true;
-  return { ok: true, mode: "new" };
-}
-
-export async function resendCode() {
-  if (!pending) return { ok: false, error: "no_pending" };
-  return requestCode({ method: pending.method, value: pending.value, forNewAccount: pending.mode === "new" });
-}
-
 export function cancelPending() {
   pending = null;
 }
 
-// Revisa, ANTES de verificar código, si el contacto secundario
-// (opcional) ya pertenece a otra cuenta.
-export async function checkSecondaryContact({ method, value }) {
-  await delay(350);
-  if (!value) return { ok: true };
-  const identity = findIdentity(method, value);
-  if (identity) {
-    return {
-      ok: false,
-      error: "conflict",
-      message:
-        method === "email"
-          ? "Este correo ya está asociado a otra cuenta de Salmos."
-          : "Este teléfono ya está asociado a otra cuenta de Salmos.",
-    };
-  }
-  return { ok: true };
-}
+// -------------------------------------------------------------------
+// Auth PRINCIPAL — email/teléfono + contraseña.
+// -------------------------------------------------------------------
 
-// 4) Google — mock sin OAuth real todavía.
-export async function signInWithGoogle() {
-  await delay(600);
-  if (maybeFailTransiently()) return { ok: false, error: "transient" };
+export async function signUpWithEmail({ email, password, name, phone }) {
+  await delay(650);
+  if (maybeFailTransiently()) return { ok: false, error: makeError("NETWORK_ERROR") };
 
-  const forcedNew = devGoogleModeOnce === "new";
-  devGoogleModeOnce = null;
+  const cleanEmail = String(email || "").trim().toLowerCase();
+  if (!EMAIL_RE.test(cleanEmail)) return { ok: false, error: makeError("EMAIL_INVALID") };
+  if (!password || password.length < MIN_PASSWORD) return { ok: false, error: makeError("WEAK_PASSWORD") };
 
-  if (!forcedNew) {
-    const identity = authIdentities.find((i) => i.provider === "google");
-    if (identity) {
-      session = { customerId: identity.customerId };
-      logAudit({ actorId: identity.customerId, actorRole: "customer", action: "CUSTOMER_SIGNED_IN" });
-      return { ok: true, status: "existing" };
-    }
+  if (accounts.some((a) => a.email === cleanEmail)) {
+    return { ok: false, error: makeError("EMAIL_ALREADY_EXISTS") };
   }
 
-  return {
-    ok: true,
-    status: "new",
-    googleProfile: { name: "Cliente Google", email: `cliente.google.${generateId("g")}@gmail.com` },
-  };
-}
-
-// 5) completeRegistration — crea identidad + customer + card.
-export async function completeRegistration({ name, secondaryContact, googleProfile }) {
-  await delay(700);
-  if (maybeFailTransiently()) return { ok: false, error: "transient" };
-
-  let primaryMethod, primaryValue;
-  if (googleProfile) {
-    primaryMethod = "google";
-    primaryValue = googleProfile.email;
-  } else {
-    if (!pending || !pending.verified) return { ok: false, error: "not_verified" };
-    primaryMethod = pending.method;
-    primaryValue = pending.value;
+  const phoneE164 = phone ? toE164Mx(phone) : null;
+  if (phoneE164 && findAccount(phoneE164)) {
+    return { ok: false, error: makeError("PHONE_IN_USE") };
   }
 
   const customerId = generateId("cus");
@@ -231,30 +150,152 @@ export async function completeRegistration({ name, secondaryContact, googleProfi
 
   customers.push({
     id: customerId,
-    name: name || googleProfile?.name || "Cliente Salmos",
-    email: primaryMethod === "email" ? primaryValue : googleProfile?.email || secondaryContact?.value || "",
-    emailVerified: primaryMethod === "email" || Boolean(googleProfile),
-    phone: primaryMethod === "phone" ? primaryValue : secondaryContact?.method === "phone" ? secondaryContact.value : "",
+    name: String(name || "").trim() || "Cliente Salmos",
+    email: cleanEmail,
+    emailVerified: true,
+    phone: phoneE164 || "",
     createdAt: now,
   });
-
-  authIdentities.push({ id: generateId("aid"), customerId, provider: primaryMethod, providerId: primaryValue });
-  if (secondaryContact?.value) {
-    authIdentities.push({
-      id: generateId("aid"),
-      customerId,
-      provider: secondaryContact.method,
-      providerId: secondaryContact.value,
-    });
+  authIdentities.push({ id: generateId("aid"), customerId, provider: "email", providerId: cleanEmail });
+  if (phoneE164) {
+    authIdentities.push({ id: generateId("aid"), customerId, provider: "phone", providerId: phoneE164 });
   }
-
   cards.push({ id: cardId, customerId, cardNumber: `SC-${String(100000 + customers.length).slice(-6)}`, status: "active" });
+  accounts.push({ customerId, email: cleanEmail, password });
 
   logAudit({ actorId: customerId, actorRole: "customer", customerId, action: "ACCOUNT_CREATED" });
-
   session = { customerId };
+  return { ok: true, mode: "complete" };
+}
+
+export async function signInWithPassword({ identifier, password }) {
+  await delay(500);
+  if (maybeFailTransiently()) return { ok: false, error: makeError("NETWORK_ERROR") };
+
+  const account = findAccount(identifier);
+  if (!account) {
+    // Espejamos al real: un email no registrado se reporta como credencial
+    // inválida (anti-enumeración); un teléfono desconocido invita a usar correo.
+    const isEmail = String(identifier || "").includes("@");
+    return { ok: false, error: isEmail ? makeError("INVALID_CREDENTIALS") : makeError("ACCOUNT_NOT_FOUND") };
+  }
+  if (account.password !== password) return { ok: false, error: makeError("INVALID_CREDENTIALS") };
+
+  session = { customerId: account.customerId };
+  logAudit({ actorId: account.customerId, actorRole: "customer", action: "CUSTOMER_SIGNED_IN" });
+  return { ok: true };
+}
+
+export async function checkSecondaryContact({ method, value }) {
+  await delay(350);
+  if (!value) return { ok: true };
+  const account = findAccount(value);
+  if (account) {
+    return {
+      ok: false,
+      error: method === "email" ? makeError("EMAIL_ALREADY_EXISTS") : makeError("PHONE_IN_USE"),
+    };
+  }
+  return { ok: true };
+}
+
+export async function resendConfirmationEmail() {
+  await delay(200);
+  return { ok: true };
+}
+
+// -------------------------------------------------------------------
+// Recuperación de contraseña — OTP (simulado).
+// -------------------------------------------------------------------
+
+export async function forgotPasswordStart({ identifier }) {
+  await delay(500);
+  if (maybeFailTransiently()) return { ok: false, error: makeError("NETWORK_ERROR") };
+
+  const account = findAccount(identifier);
+  if (!account) return { ok: false, error: makeError("ACCOUNT_NOT_FOUND") };
+
+  pending = {
+    identifier,
+    email: account.email,
+    code: DEMO_OTP,
+    expiresAt: Date.now() + 5 * 60 * 1000,
+    verified: false,
+  };
+  return { ok: true, maskedContact: maskContact("email", account.email) };
+}
+
+export async function forgotPasswordVerify({ code }) {
+  await delay(500);
+  if (maybeFailTransiently()) return { ok: false, error: makeError("NETWORK_ERROR") };
+  if (!pending) return { ok: false, error: makeError("OTP_INVALID") };
+
+  if (code === "000000" || Date.now() > pending.expiresAt) {
+    return { ok: false, error: makeError("OTP_EXPIRED") };
+  }
+  if (code !== pending.code) return { ok: false, error: makeError("OTP_INVALID") };
+
+  pending.verified = true;
+  return { ok: true };
+}
+
+export async function forgotPasswordResend() {
+  await delay(400);
+  if (!pending) return { ok: false };
+  return forgotPasswordStart({ identifier: pending.identifier });
+}
+
+export async function setNewPassword({ newPassword }) {
+  await delay(500);
+  if (!pending || !pending.verified) return { ok: false, error: makeError("OTP_INVALID") };
+  if (!newPassword || newPassword.length < MIN_PASSWORD) return { ok: false, error: makeError("WEAK_PASSWORD") };
+
+  const account = accounts.find((a) => a.email === pending.email);
+  if (account) account.password = newPassword;
   pending = null;
   return { ok: true };
+}
+
+// -------------------------------------------------------------------
+// Google — simula el redirect → sesión ya resuelta.
+// -------------------------------------------------------------------
+
+export async function signInWithGoogle() {
+  await delay(600);
+  if (maybeFailTransiently()) return { ok: false, error: makeError("NETWORK_ERROR") };
+
+  const forcedNew = devGoogleModeOnce === "new";
+  devGoogleModeOnce = null;
+
+  const identity = authIdentities.find((i) => i.provider === "google");
+  if (identity && !forcedNew) {
+    session = { customerId: identity.customerId };
+    logAudit({ actorId: identity.customerId, actorRole: "customer", action: "CUSTOMER_SIGNED_IN" });
+    return { ok: true, status: "existing" };
+  }
+
+  // Google "nuevo": crea la cuenta y deja la sesión lista (igual que el
+  // proveedor real: el correo llega verificado por el propio Google).
+  const email = `cliente.google.${generateId("g")}@gmail.com`;
+  const customerId = generateId("cus");
+  const cardId = generateId("card");
+  const now = new Date().toISOString();
+
+  customers.push({
+    id: customerId,
+    name: "Cliente Google",
+    email,
+    emailVerified: true,
+    phone: "",
+    createdAt: now,
+  });
+  authIdentities.push({ id: generateId("aid"), customerId, provider: "google", providerId: email });
+  cards.push({ id: cardId, customerId, cardNumber: `SC-${String(100000 + customers.length).slice(-6)}`, status: "active" });
+  accounts.push({ customerId, email, password: null });
+
+  logAudit({ actorId: customerId, actorRole: "customer", customerId, action: "ACCOUNT_CREATED" });
+  session = { customerId };
+  return { ok: true, status: "new" };
 }
 
 // --- Staff -----------------------------------------------------------------

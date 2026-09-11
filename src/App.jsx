@@ -108,7 +108,14 @@ function ClientApp() {
     return (
       <div className="sc-phone">
         <div className="sc-main">
-          <AuthScreen onSignedIn={() => authService.getSession().then(setSession)} />
+          <AuthScreen
+            onSignedIn={() =>
+              authService.getSession().then((s) => {
+                if (s) setSession(s);
+                return s;
+              })
+            }
+          />
         </div>
       </div>
     );
