@@ -159,7 +159,8 @@ site_url = "http://127.0.0.1:3000"
 # The public URL that Auth serves on. Defaults to the API external URL with `/auth/v1` appended.
 # external_url = ""
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
-additional_redirect_urls = ["https://127.0.0.1:3000"]
+# Local dev corre sobre http (Vite). Añadir aquí las URLs reales de producción al definir el dominio.
+additional_redirect_urls = ["http://127.0.0.1:3000"]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # JWT issuer URL. If not set, defaults to auth.external_url.
@@ -232,26 +233,51 @@ otp_length = 6
 # Number of seconds before the email OTP expires (defaults to 1 hour).
 otp_expiry = 3600
 
-# Use a production-ready SMTP server
+# Use a production-ready SMTP server. Ver AUTH_AUDIT.md §AUTH-2/BLOQUEADO:
+# requiere proveedor + dominio + SPF/DKIM/DMARC (datos externos). Al descomentar,
+# definir SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/SMTP_ADMIN_EMAIL/SMTP_SENDER_NAME
+# en `.env` (gitignored); `supabase start` falla si faltan.
 # [auth.email.smtp]
 # enabled = true
-# host = "smtp.sendgrid.net"
+# host = "env(SMTP_HOST)"
 # port = 587
-# user = "apikey"
-# pass = "env(SENDGRID_API_KEY)"
-# admin_email = "admin@email.com"
-# sender_name = "Admin"
+# user = "env(SMTP_USER)"
+# pass = "env(SMTP_PASS)"
+# admin_email = "env(SMTP_ADMIN_EMAIL)"
+# sender_name = "env(SMTP_SENDER_NAME)"
 
-# Uncomment to customize email template
-# [auth.email.template.invite]
-# subject = "You have been invited"
-# content_path = "./supabase/templates/invite.html"
+# Plantillas de email propias (diseño aprobado, ver docs/SALMOS_EMAIL_DESIGN.md).
+# Asuntos y preheaders según diseño; el email de "código OTP" usa la plantilla
+# magic_link con {{ .Token }} (sin ConfirmationURL) para que GoTrue lo envíe como
+# OTP de 6 dígitos, que es el flujo real de recuperación de la app.
 
-# Uncomment to customize notification email template
-# [auth.email.notification.password_changed]
-# enabled = true
-# subject = "Your password has been changed"
-# content_path = "./supabase/templates/password_changed_notification.html"
+# Confirma tu correo (design #1) — se envía al registrarse si confirmations está ON.
+[auth.email.template.confirmation]
+subject = "Confirma tu correo en Salmos Café"
+content_path = "./supabase/templates/confirmation.html"
+
+# Restablece tu contraseña (design #2) — se envía con resetPasswordForEmail.
+# OJO: la app usa signInWithOtp para la recuperación, que dispara magic_link
+# (design #3), no esta plantilla. Se deja lista para el flujo de link si cambia.
+[auth.email.template.recovery]
+subject = "Restablece tu contraseña de Salmos Café"
+content_path = "./supabase/templates/recovery.html"
+
+# Código OTP (design #3) — SOLO {{ .Token }}, sin ConfirmationURL: así GoTrue
+# entrega el código de 6 dígitos en vez de un link. Es el correo real de la
+# recuperación de contraseña de la app (signInWithOtp).
+[auth.email.template.magic_link]
+subject = "Tu código de acceso a Salmos Café"
+content_path = "./supabase/templates/magic_link.html"
+
+# Confirma tu nuevo correo (design #4) — se envía al cambiar email (AUTH-6).
+[auth.email.template.email_change]
+subject = "Confirma tu nuevo correo en Salmos Café"
+content_path = "./supabase/templates/email_change.html"
+
+# Bienvenida (design #5) — no tiene disparador nativo en Supabase Auth; la plantilla
+# vive en ./supabase/templates/welcome.html y su envío queda PENDIENTE MANUAL
+# (ver AUTH_AUDIT.md §AUTH-2).
 
 [auth.sms]
 # Allow/disallow new user signups via SMS to your project.
@@ -332,6 +358,21 @@ url = ""
 skip_nonce_check = false
 # If enabled, it will allow the user to successfully authenticate when the provider does not return an email address.
 email_optional = false
+
+# Google OAuth (AUTH-1). Requiere client_id/client_secret de Google Cloud Console
+# (datos externos). Definir GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET en `.env`
+# (gitignored) y descomentar: `supabase start` falla si env() queda sin variable.
+# El redirect permitido se controla con site_url / additional_redirect_urls (arriba).
+# No romper local: bloque comentado hasta tener credenciales.
+# [auth.external.google]
+# enabled = true
+# client_id = "env(GOOGLE_CLIENT_ID)"
+# DO NOT commit your OAuth provider secret to git. Use environment variable substitution instead:
+# secret = "env(GOOGLE_CLIENT_SECRET)"
+# redirect_uri = ""
+# url = ""
+# skip_nonce_check = false
+# email_optional = false
 
 # Allow Solana wallet holders to sign in to your project via the Sign in with Solana (SIWS, EIP-4361) standard.
 # You can configure "web3" rate limit in the [auth.rate_limit] section and set up [auth.captcha] if self-hosting.
