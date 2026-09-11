@@ -1,11 +1,52 @@
-# Salmos Café Loyalty — V1
+# Salmos Café Loyalty
 
-Frontend del programa de lealtad de Salmos Café, con el motor de
-fidelización real (no solo UI) implementado en `src/services/` sobre un
-mock en memoria (`src/data/mockDatabase.js`), listo para reemplazar por
-Supabase sin reescribir pantallas.
+Programa de lealtad de **Salmos Café**: una SPA (React) para clientes, staff y
+admin donde cada compra elegible suma una visita y la **8ª visita** gana un
+café gratis. La cuenta del cliente vive en **Supabase** (Auth + Postgres +
+Edge Functions) y se sincroniza con el registro de clientes del **POS
+Loyverse** (crear, vincular y actualizar) sin duplicados.
 
-Ver `PLAN.md` para la auditoría original y el modelo de datos completo.
+El proyecto está en **desarrollo activo**: la base, la autenticación de
+cliente y la sincronización con Loyverse están implementadas; el motor de
+lealtad funciona con reglas reales, pero todavía sobre datos en memoria
+hasta migrarlo a Supabase. **No está "production complete".**
+
+## Project Status
+
+- **En desarrollo activo.**
+- ✅ Base funcional: app + motor de fidelización real (reglas verificadas por tests).
+- ✅ Autenticación de cliente en Supabase (correo/teléfono + contraseña, OTP solo para recuperación, Google).
+- ✅ Sincronización Loyverse: crear, vincular y **actualizar conservadoramente** a clientes existentes (Fase C — código y tests terminados).
+- ⚠️ **Deployment pendiente**: la migración `0004` y la Edge Function `loyverse-customers` actualizada aún **no** se han aplicado al ambiente real.
+- ⏳ Siguiente paso: migrar el motor de lealtad a Supabase.
+
+## Development Status
+
+| Fase | Estado | Contenido |
+|---|---|---|
+| Fase A — Foundation | ✅ | Estructura de la app, arquitectura `services/`, reglas de lealtad (sobre mock) |
+| Fase B — Authentication | ✅ | Supabase Auth real de cliente |
+| Fase C — Loyverse Sync | ✅ | Crear/vincular/actualizar clientes (código + tests; deployment pendiente) |
+| Fase D — Loyalty | ⏳ | Motor sobre mock → migrar a Supabase |
+| Fase E — Sales / POS | ⏳ | `ManualSalesAdapter` hoy; ventas Loyverse no conectadas |
+
+## Roadmap
+
+- Foundation ✅
+- Authentication ✅
+- Loyverse integration ✅
+- Loyverse customer sync ✅
+- Loyalty engine ⏳
+- Customer loyalty experience ⏳
+- Sales / POS integration ⏳
+- Production hardening ⏳
+
+## Tech Stack
+
+- **React 18 + Vite 6** (SPA)
+- **Supabase**: Auth · PostgreSQL 17 · Edge Functions (Deno)
+- **Loyverse API (v1.0)** — solo server-side, desde la Edge Function
+- **Tests**: test runner nativo de Node (`node --test`)
 
 ## Reglas de negocio implementadas
 
@@ -25,6 +66,14 @@ Ver `PLAN.md` para la auditoría original y el modelo de datos completo.
 
 Ver `tests/loyalty.test.mjs`, `tests/loyverse-sync.test.mjs` y
 `tests/auth.test.mjs` para las reglas verificadas (correr con `npm test`).
+
+## Tests / calidad
+
+- **61 tests pasando** (`npm test`): motor de lealtad, flujo de auth y
+  sincronización Loyverse (crear/vincular/actualizar/conflicto).
+- `npm run build` compila sin errores (hay un aviso **preexistente** de
+  tamaño de chunk de Vite > 500 kB, no introducido por Fase C).
+- `npm audit` reporta **0 vulnerabilidades**.
 
 ## Cómo correrlo
 
@@ -119,6 +168,49 @@ vincula si coincide con uno solo → **conflicto** si email y teléfono
 apuntan a clientes distintos (no crea un tercero) → crea solo si no
 existe, con `customer_code` como nombre estable e idempotente.
 
+### Sincronización de clientes existentes (Fase C)
+
+Además de crear y vincular, la sincronización **actualiza** de forma
+conservadora a los clientes que ya existen en Loyverse:
+
+- Se busca por email y/o teléfono y se vincula al cliente correcto **sin
+  duplicados**.
+- Los **campos permitidos que faltan** en Loyverse (nombre, email,
+  teléfono, `customer_code`) se sincronizan desde Salmos.
+- La actualización es **conservadora**: nunca sobrescribe un valor distinto.
+  Un email o teléfono **distinto** en el cliente existente **bloquea** el
+  vínculo con un conflicto de identidad (el cliente es dirigido a entrar con
+  esa cuenta o a recuperar su contraseña y vincular correo y teléfono).
+- Datos del POS (`total_visits`, `total_spent`, `total_points`, recibos)
+  permanecen **intocables**.
+- Cada actualización real queda **auditada** y el flujo es **idempotente**
+  (reintentos no duplican ni tocan nada que ya coincida).
+
+## Seguridad
+
+- El token de Loyverse vive **solo server-side** (Edge Function); el
+  navegador nunca llama a `api.loyverse.com`.
+- Crear/actualizar clientes ocurre **dentro de la Edge Function**, autenticada
+  con el JWT del usuario (`verify_jwt`).
+- **RLS activo**: cada usuario solo accede a su fila en Postgres.
+- No se exponen secretos ni datos sensibles al frontend; los errores se
+  traducen a mensajes amigables.
+
+## Pending deployment (MUY IMPORTANTE)
+
+La Fase C está terminada en código y tests, pero **aún no se ha aplicado al
+ambiente real**:
+
+1. `supabase db push` para aplicar la migración
+   `supabase/migrations/0004_loyverse_updated_event.sql` (acepta el evento
+   de auditoría `loyverse_updated`).
+2. Redeploy de la Edge Function:
+   `supabase functions deploy loyverse-customers`.
+
+Hasta hacerlo, el ambiente real **no** tendrá el auto-update de clientes ni
+podrá auditar `loyverse_updated` (mientras tanto, cualquier template de
+`Loyverse Customer Updated` seguirá fallando al insertar el evento).
+
 ## Credenciales de la demo
 
 - **Cliente:** `javier@example.com` — contraseña `demo1234`.
@@ -205,7 +297,7 @@ confirma Staff, nunca el cliente.
 | Datos de lealtad (clientes, ventas, ciclos) | Mock, en memoria — se pierden al recargar la página |
 | Auth Cliente (correo/teléfono + contraseña; OTP solo recuperación; Google; sesión persistente, Supabase) | Real, con `.env`; demo mock sin `.env` (facade `authService`) |
 | Perfil `customers` + `customer_code` | Real (Postgres, RLS) cuando está configurado |
-| Sync Loyverse (crear/vincular sin duplicar, con reintento y conflicto) | Real vía Edge Function; lógica probada en `tests/loyverse-sync.test.mjs` |
+| Sync Loyverse (crear/vincular/actualizar clientes sin duplicar, con reintento, conflicto de identidad y auditoría `loyverse_updated`) | Real vía Edge Function; lógica probada en `tests/loyverse-sync.test.mjs`. **Deployment pendiente**: migración `0004` y redeploy de la función aún no aplicados |
 | Auth Staff / Admin | Mock (PIN) |
 | QR | Visual únicamente — `customer_code` sirve hoy de token; firmado en Fase 2 |
 | Tickets/email | Fuera de alcance de V1 (decisión de negocio) — `tickets` queda como tabla/punto de extensión sin usar |
@@ -221,3 +313,10 @@ con Edge Function transaccional para `registerSale`/`cancelSale`, QR con
 token firmado, y `LoyverseSalesAdapter` cuando exista acceso real a la
 cuenta — una vez migrado el motor, `ensureLoyaltyProfile` (DEV bridge en
 `customerService`) se elimina junto con `mockDatabase`.
+
+## Documentation
+
+- `docs/CURRENT_STATUS.md` — estado actual verificable del proyecto.
+- `docs/AUTH_AND_LOYVERSE_FLOW.md` — flujo de auth y sincronización con Loyverse.
+- `AUTH_UX_DESIGN.md` — decisiones de UX del flujo de autenticación.
+- `Salmos_Estructura_de_Datos.md` — auditoría original y modelo de datos completo.
