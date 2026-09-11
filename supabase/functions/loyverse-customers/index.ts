@@ -87,6 +87,15 @@ function createTransport(accessToken) {
       const data = await request(LOYVERSE_BASE, { method: "POST", body: JSON.stringify(payload) });
       return data;
     },
+    async update(customerId, payload) {
+      // PUT parcial: solo se envían los campos que Salmos rellena (nunca
+      // total_* ni campos derivados del POS) — Loyverse conserva el resto.
+      const data = await request(`${LOYVERSE_BASE}/${encodeURIComponent(customerId)}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      return data;
+    },
   };
 }
 
@@ -180,8 +189,12 @@ Deno.serve(async (req) => {
           .from("customers")
           .update({ loyverse_sync_status: "failed" })
           .eq("auth_user_id", user.id);
+        // identity_conflict ⇄ email/teléfono distintos en el cliente ya
+        // resuelto: la UI muestra cómo vincular/recuperar la cuenta.
+        const code =
+          result.audit?.code === "identity_conflict" ? "loyverse_identity_conflict" : "loyverse_customer_conflict";
         return json(
-          { ok: false, code: "loyverse_customer_conflict", traceId, retriable: false },
+          { ok: false, code, traceId, retriable: false },
           409
         );
       }
@@ -200,9 +213,11 @@ Deno.serve(async (req) => {
         eventType:
           result.status === "created"
             ? "loyverse_created"
-            : result.status === "already_linked"
-              ? "loyverse_already_linked"
-              : "loyverse_linked",
+            : result.status === "updated"
+              ? "loyverse_updated"
+              : result.status === "already_linked"
+                ? "loyverse_already_linked"
+                : "loyverse_linked",
         detail: result.audit || {},
       });
 

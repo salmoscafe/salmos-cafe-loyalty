@@ -95,10 +95,54 @@ cliente entra con su contraseña nueva.
    `buildSession`:
    - asegura la fila `customers` (idempotente; `customer_code` `SC-…` único);
    - siembra el mock de lealtad (`ensureLoyaltyProfile`, DEV bridge);
-   - llama a la Edge Function `loyverse-customers` para crear/vincular el
-     cliente de Loyverse (nunca directo desde el navegador).
+   - llama a la Edge Function `loyverse-customers` para crear/vincular (y, si
+     corresponde, actualizar) el cliente de Loyverse (nunca directo desde el
+     navegador).
 3. Si el sync falla, la sesión **se entrega igual** y `SyncBanner` ofrece
    retry. `retryLoyverseSync` re-dispara desde el perfil/Home.
+
+## Sincronización con Loyverse: crear, vincular y actualizar (Fase 1 + Fase C)
+
+El flujo completo decide en la capa pura
+`supabase/functions/_shared/loyverseCore.js` (unit-testable) y ejecuta contra
+la API de Loyverse SOLO en la Edge Function (dueña de
+`LOYVERSE_ACCESS_TOKEN`).
+
+1. **Buscar**: email (filtro oficial `?email=…&limit=1`) y teléfono (la API no
+   filtra; se pagina `limit=250` con tope de 15 páginas y se filtra por
+   dígitos). Si el perfil ya tiene `loyverse_customer_id` + `synced`, sale
+   `already_linked` **sin red**.
+2. **Crear**: si no existe, `POST /v1.0/customers` con `name`, `email`,
+   `phone_number` (E.164 +52), `customer_code`. Duplicado por `customer_code`
+   (400) → rebusca y vincula.
+3. **Vincular**: si existe (email y/o teléfono), se vincula al cliente
+   existente sin crear (nunca duplicados). Si email→X y teléfono→Y (distintos)
+   o el teléfono es ambiguo → conflicto (409, no retriable).
+4. **Actualizar (Fase C, reglas conservadoras)**: al resolver a UN cliente
+   existente, `computeIdentityUpdates` compara los datos de Salmos contra los
+   de Loyverse:
+   - idénticos (tras normalizar) → **no** hay `PUT` (idempotencia de red);
+   - faltantes en Loyverse (email, teléfono, `customer_code` null o nombre
+     vacío) → se **rellenan** con un `PUT` parcial (status `updated`, evento
+     `loyverse_updated`);
+   - email/teléfono **distintos** → **NUNCA** se sobrescriben: bloquea con
+     409 `loyverse_identity_conflict` (status conflict). El cliente debe
+     entrar con esa cuenta (o recuperar su contraseña) y dejar correo y
+     teléfono enlazados; SyncBanner muestra esa guía;
+   - nombre / `customer_code` distintos (ambos no vacíos) → **no** se
+     sobrescriben; se omiten y se registran en el detalle de auditoría
+     (`detail.skippedFields`);
+   - datos del POS (`total_visits`, `total_spent`, `total_points`, ventas)
+     **jamás** se leen ni viajan en el `PUT`.
+5. **Auditoría**: eventos en `customer_sync_events` (`loyverse_created`,
+   `loyverse_linked`, `loyverse_updated`, `loyverse_already_linked`,
+   `loyverse_conflict`, `loyverse_error`) — `loyverse_updated` se registra
+   SOLO cuando hubo una actualización real. El tipo lo permite la migración
+   `0004` (la CHECK de `event_type` de 0001 no lo incluía).
+
+Cambios de comportamiento esperado (documentados y cubiertos en tests):
+un cliente existente cuyo **teléfono difiere** del de Salmos ya no se vincula
+en silencio; pasa a conflicto conservador (antes se vinculaba sin tocar nada).
 
 ## Google (OAuth)
 

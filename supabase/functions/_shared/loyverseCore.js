@@ -4,7 +4,8 @@
 // decide: buscar por email → buscar por teléfono → vincular o crear.
 //
 // Es 100% agnóstico del transporte: recibe un `transport` con
-//   { listByEmail(email), listByPhone(phone), create(payload) }
+//   { listByEmail(email), listByPhone(phone), create(payload),
+//     update(customerId, payload) }
 // y no depende de Deno ni de Supabase, por eso es unit-testable con
 // node --test (ver tests/loyverse-sync.test.mjs).
 //
@@ -14,6 +15,10 @@
 //                                                se lista+y-filtra acá.
 //   * POST /customers                            crea con name, email,
 //                                                phone_number, customer_code.
+//   * PUT  /customers/{id}                       actualiza SOLO los campos
+//                                                que se envían; los campos
+//                                                derivados del POS (total_*)
+//                                                nunca viajan ni se tocan.
 //   * Las listas devuelven { customers: [...], cursor? } (cursor opcional).
 //   * Rate limit: 300 req / 300 s por cuenta.
 // ---------------------------------------------------------------
@@ -97,6 +102,79 @@ export function isDuplicateCustomerCodeError(error) {
   );
 }
 
+// --------------------- Actualización de identidad -----------------------
+//
+// Reglas conservadoras (decididas con el socio, ver docs/CURRENT_STATUS.md):
+//   * Email/teléfono IDÉNTICOS (tras normalizar)  → nada que hacer.
+//   * Email/teléfono FALTANTES en Loyverse       → rellenar (fill).
+//   * Email/teléfono DIFERENTES (ambos presentes)→ NUNCA se sobrescriben:
+//     se bloquea toda la sincronización (conflicto identity_conflict) y se
+//     guía al cliente a vincular correo y teléfono o recuperar su contraseña.
+//   * customer_code null en Loyverse             → se establece (fill).
+//   * customer_code DIFERENTE (no nulo)          → se omite y se registra en
+//     auditoría (nunca se pisa el código del POS).
+//   * Nombre vacío en Loyverse                   → se rellena (fill).
+//   * Nombre DIFERENTE (no vacío)                → se omite y se registra.
+//   * Datos del POS (total_visits, total_spent, total_points, ventas) NO
+//     se leen ni se mandan jamás en el update.
+//
+// `fill` solo se aplica cuando la base de Loyverse está incompleta y Salmos
+// tiene el dato; nunca cuando hay dos valores distintos.
+
+// Compara los datos de Salmos con el cliente Loyverse ya resuelto y devuelve:
+//   { fills, block, skipped }
+//   fills   → { campo: valor } a mandar por PUT (solo rellenos seguros).
+//   block   → campos que NO se sobrescriben y bloquean el sync
+//             (`email`/`phone` por regla conservadora).
+//   skipped → campos que se omiten sin bloquear (`name`/`customer_code`),
+//             se registran en auditoría.
+export function computeIdentityUpdates({ name, email, phone, customerCode, loyverse }) {
+  const fills = {};
+  const block = [];
+  const skipped = [];
+  const lv = loyverse || {};
+
+  const lvEmail = normalizeEmail(lv.email);
+  const salmosEmail = normalizeEmail(email);
+  if (salmosEmail) {
+    if (!lvEmail) fills.email = salmosEmail;
+    else if (lvEmail !== salmosEmail) block.push("email");
+  }
+
+  const lvPhoneRaw = normalizePhone(lv.phone_number);
+  // Ambos lados se normalizan a la MISMA clave E.164: así "+526641234567"
+  // (Loyverse) y "6641234567" (Salmos, sin prefijo) son el mismo número.
+  const lvPhoneKey = lvPhoneRaw ? normalizePhone(toE164(lv.phone_number)) : null;
+  const salmosPhoneKey = phone ? normalizePhone(toE164(phone)) : null;
+  const salmosE164 = toE164(phone);
+  if (phone) {
+    if (!lvPhoneRaw) fills.phone_number = salmosE164;
+    else if (lvPhoneKey !== salmosPhoneKey) block.push("phone");
+  }
+
+  const lvCode = String(lv.customer_code || "").trim();
+  const salmosCode = String(customerCode || "").trim();
+  if (salmosCode) {
+    if (!lvCode) fills.customer_code = salmosCode.slice(0, 40);
+    else if (lvCode !== salmosCode) skipped.push("customer_code");
+  }
+
+  const lvName = String(lv.name || "").trim();
+  const salmosName = String(name || "").trim();
+  if (salmosName) {
+    if (!lvName) fills.name = salmosName.slice(0, 64);
+    else if (lvName !== salmosName) skipped.push("name");
+  }
+
+  return { fills, block, skipped };
+}
+
+function pickResolvedCustomer(emailMatches, phoneMatches) {
+  const emailTarget = (emailMatches || [])[0] || null;
+  if (emailTarget) return emailTarget;
+  return pickUnique(phoneMatches || []) || null;
+}
+
 // ----------------------------- Orquestación -----------------------------
 
 // Orden de operación (clave para no duplicar):
@@ -130,7 +208,49 @@ export async function createOrLinkLoyverseCustomer({
 
   const resolution = resolveLoyverseTarget({ emailMatches, phoneMatches });
   if (resolution.status === "linked") {
-    return { status: "linked", loyverseCustomerId: resolution.loyverseCustomerId, audit: resolution.audit };
+    // Ya resuelto a UN cliente de Loyverse: se comparan los datos y se
+    // decide si hay que actualizar (solo rellenos) o si hay conflicto de
+    // identidad (email/teléfono distintos → bloque). Nunca se sobrescriben
+    // valores distintos ni se tocan datos derivados del POS.
+    const identity = computeIdentityUpdates({
+      name,
+      email: normalizedEmail,
+      phone: normalizedPhone,
+      customerCode,
+      loyverse: pickResolvedCustomer(emailMatches, phoneMatches),
+    });
+
+    if (identity.block.length) {
+      return {
+        status: "conflict",
+        audit: {
+          code: "identity_conflict",
+          fields: identity.block,
+          loyverseCustomerId: resolution.loyverseCustomerId,
+          via: resolution.audit.via,
+        },
+      };
+    }
+
+    if (Object.keys(identity.fills).length) {
+      await transport.update(resolution.loyverseCustomerId, identity.fills);
+      return {
+        status: "updated",
+        loyverseCustomerId: resolution.loyverseCustomerId,
+        audit: {
+          ...resolution.audit,
+          updated: true,
+          fields: Object.keys(identity.fills),
+          skippedFields: identity.skipped,
+        },
+      };
+    }
+
+    return {
+      status: "linked",
+      loyverseCustomerId: resolution.loyverseCustomerId,
+      audit: { ...resolution.audit, updated: false, skippedFields: identity.skipped },
+    };
   }
   if (resolution.status === "conflict") {
     return { status: "conflict", audit: resolution.audit };

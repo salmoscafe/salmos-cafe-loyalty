@@ -150,7 +150,10 @@ async function runLoyverseSync(profile) {
     result = { status: "failed", error: "loyverse_unavailable" };
   }
   const dbStatus =
-    result.status === "created" || result.status === "linked" || result.status === "already_synced"
+    result.status === "created" ||
+    result.status === "updated" ||
+    result.status === "linked" ||
+    result.status === "already_synced"
       ? "synced"
       : "failed";
   await supabaseClient
@@ -194,7 +197,13 @@ async function buildSession(user) {
   let syncStatus = profile.loyverse_sync_status || "pending";
   try {
     const sync = await runLoyverseSync(profile);
-    if (sync.status === "created" || sync.status === "linked" || sync.status === "already_synced") syncStatus = "synced";
+    if (
+      sync.status === "created" ||
+      sync.status === "updated" ||
+      sync.status === "linked" ||
+      sync.status === "already_synced"
+    )
+      syncStatus = "synced";
     else syncStatus = "failed";
   } catch {
     syncStatus = "failed";

@@ -30,7 +30,7 @@ export function SyncBanner({ status, onRetry }) {
         </p>
         <p className="sc-sync-banner__msg">
           {isConflict
-            ? "Tus datos coinciden con el registro de otro cliente. Escríbenos para resolverlo y conservar tus puntos."
+            ? "Tu correo o teléfono ya están vinculados a otro cliente. Ingresa con esa cuenta o recupera tu contraseña, y asegúrate de que tu correo y tu teléfono queden enlazados para conservar tus puntos."
             : "Puedes reintentarlo ahora o después; tus puntos no se pierden."}
         </p>
       </div>

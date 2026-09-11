@@ -6,6 +6,10 @@
 //   createOrLinkLoyverseCustomer(profile)
 //     → { status: "synced"|"failed"|"conflict", ... }
 //
+// (internamente la Edge Function puede devolver `created | linked |
+// updated | already_linked | conflict`; `updated` se mapea a `synced`
+// en supabaseAuthService, aquí solo se pasan los status de éxito.)
+//
 // La lógica de decisión (buscar por email/teléfono, no duplicar,
 // caso de conflicto, idempotencia) vive del lado servidor en la Edge
 // Function (`supabase/functions/_shared/loyverseCore.js`). Aquí solo
@@ -20,7 +24,7 @@ function normalizeResult(result) {
   if (result.ok) {
     return { status: result.status, loyverseCustomerId: result.loyverseCustomerId };
   }
-  if (result.code === "loyverse_customer_conflict") {
+  if (result.code === "loyverse_customer_conflict" || result.code === "loyverse_identity_conflict") {
     return { status: "conflict", error: result.code };
   }
   return { status: "failed", error: result.code || "loyverse_unavailable", retriable: result.retriable };
