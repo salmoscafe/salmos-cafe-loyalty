@@ -18,7 +18,8 @@ hasta migrarlo a Supabase. **No está "production complete".**
 - ✅ Autenticación de cliente en Supabase (correo/teléfono + contraseña, OTP solo para recuperación, Google).
 - ✅ Sincronización Loyverse: crear, vincular y **actualizar conservadoramente** a clientes existentes (Fase C — código y tests terminados).
 - ✅ **Navegación real por URL** (`/`, `/Staff`, `/Admin`) y **UI de Cliente/Auth limpia** (sin selector de demo; login "Bienvenido"; icono de Google).
-- ⚠️ **Deployment pendiente**: la migración `0004` y la Edge Function `loyverse-customers` actualizada aún **no** se han aplicado al ambiente real.
+- ✅ **Desplegado y validado en producción**: migraciones `0001`–`0006` aplicadas en el ambiente real y Edge Function `loyverse-customers` activa (`verify_jwt = true`).
+- ✅ **Corrección de concurrencia Loyverse** validada con QA real: 2 invocaciones simultáneas → solo una procede; la perdedora responde `409 loyverse_sync_in_progress` (retriable) sin crear cliente duplicado.
 - ⏳ Siguiente paso: migrar el motor de lealtad a Supabase.
 
 ## Development Status
@@ -27,7 +28,7 @@ hasta migrarlo a Supabase. **No está "production complete".**
 |---|---|---|
 | Fase A — Foundation | ✅ | Estructura de la app, arquitectura `services/`, reglas de lealtad (sobre mock) |
 | Fase B — Authentication | ✅ | Supabase Auth real de cliente |
-| Fase C — Loyverse Sync | ✅ | Crear/vincular/actualizar clientes (código + tests; deployment pendiente) |
+| Fase C — Loyverse Sync | ✅ | Crear/vincular/actualizar clientes sin duplicados, incl. claim atómico de concurrencia (código + tests + despliegue + QA real) |
 | Fase D — Loyalty | ⏳ | Motor sobre mock → migrar a Supabase |
 | Fase E — Sales / POS | ⏳ | `ManualSalesAdapter` hoy; ventas Loyverse no conectadas |
 
@@ -70,8 +71,8 @@ Ver `tests/loyalty.test.mjs`, `tests/loyverse-sync.test.mjs` y
 
 ## Tests / calidad
 
-- **112 tests pasando** (`npm test`): motor de lealtad, flujo de auth,
-  sincronización Loyverse (crear/vincular/actualizar/conflicto) y
+- **130 tests pasando** (`npm test`): motor de lealtad, flujo de auth,
+  sincronización Loyverse (crear/vincular/actualizar/conflicto/concurrencia) y
   navegación por pathname.
 - `npm run build` compila sin errores (hay un aviso **preexistente** de
   tamaño de chunk de Vite > 500 kB, no introducido por Fase C).
@@ -188,6 +189,14 @@ conservadora a los clientes que ya existen en Loyverse:
   permanecen **intocables**.
 - Cada actualización real queda **auditada** y el flujo es **idempotente**
   (reintentos no duplican ni tocan nada que ya coincida).
+- **Defensa de concurrencia server-side (0006 + `_shared/syncClaim.js`)**: la
+  Edge adquiere un **claim atómico por fila** (`loyverse_sync_claim` +
+  `loyverse_sync_claim_at`) antes de tocar la API; una segunda invocación
+  simultánea del mismo perfil responde `409 loyverse_sync_in_progress`
+  (`retriable: true`) sin llegar a Loyverse, y el claim se libera al terminar
+  (lease de 10 min para claims abandonados; liberación solo por el token
+  dueño). El guard **single-flight** del frontend sigue siendo la primera
+  barrera (una sola llamada remota por perfil).
 
 ## Seguridad
 
@@ -199,20 +208,23 @@ conservadora a los clientes que ya existen en Loyverse:
 - No se exponen secretos ni datos sensibles al frontend; los errores se
   traducen a mensajes amigables.
 
-## Pending deployment (MUY IMPORTANTE)
+## Deployment (aplicado)
 
-La Fase C está terminada en código y tests, pero **aún no se ha aplicado al
-ambiente real**:
+El cierre de despliegue de la Fase C y el hardening de concurrencia **ya se
+aplicaron al ambiente real**:
 
-1. `supabase db push` para aplicar la migración
-   `supabase/migrations/0004_loyverse_updated_event.sql` (acepta el evento
-   de auditoría `loyverse_updated`).
-2. Redeploy de la Edge Function:
-   `supabase functions deploy loyverse-customers`.
+1. Migraciones aplicadas en remoto: `0001`–`0006` (incluye `0004`
+   `loyverse_updated` y `0006` del claim atómico de sync).
+2. Edge Function `loyverse-customers` desplegada y activa (`verify_jwt =
+   true`) con `_shared/syncClaim.js` y `loyverseCore.js` actualizado.
 
-Hasta hacerlo, el ambiente real **no** tendrá el auto-update de clientes ni
-podrá auditar `loyverse_updated` (mientras tanto, cualquier template de
-`Loyverse Customer Updated` seguirá fallando al insertar el evento).
+Comportamiento de concurrencia en producción: dos invocaciones simultáneas del
+mismo perfil → la primera adquiere el claim de `customers`
+(`loyverse_sync_claim`, lease de 10 min) y continúa; la segunda responde
+`409 loyverse_sync_in_progress` (`retriable: true`) sin llamar a la API de
+Loyverse. Un perfil ya `synced` responde `already_linked` sin tocar el claim.
+El claim se libera al terminar (solo por el token dueño) y el fix `b0351f5`
+sigue re-buscando ante un error de duplicado al crear.
 
 ## Credenciales de la demo
 

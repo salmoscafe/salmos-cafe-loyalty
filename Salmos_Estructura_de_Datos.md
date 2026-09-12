@@ -141,6 +141,8 @@ Esta tabla representa al cliente dentro del ecosistema Salmos.
   `customer_code`          Código estable del cliente Salmos
   `loyverse_customer_id`   ID del cliente equivalente en Loyverse
   `loyverse_sync_status`   Estado de sincronización
+  `loyverse_sync_claim`    Token UUID del claim de sincronización (0006)
+  `loyverse_sync_claim_at` Instante del claim; expiración a los 10 min (0006)
   `created_at`             Fecha de creación
   `updated_at`             Última actualización
 
@@ -165,6 +167,13 @@ loyverse customer.id
 
 Esto evita que dos cuentas Salmos terminen vinculadas accidentalmente al
 mismo cliente de Loyverse.
+
+**Claim de sincronización (migración 0006):** `loyverse_sync_claim` +
+`loyverse_sync_claim_at` implementan un **bloqueo por fila** para que dos
+invocaciones concurrentes de la Edge Function `loyverse-customers` del mismo
+perfil no puedan cruzar la búsqueda+creación y duplicar clientes en Loyverse.
+Lo toma la Edge con un UPDATE condicional atómico; expira a los 10 minutos y se
+libera solo con el token del dueño.
 
 ------------------------------------------------------------------------
 

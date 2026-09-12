@@ -142,14 +142,31 @@ la API de Loyverse SOLO en la Edge Function (dueña de
    SOLO cuando hubo una actualización real. El tipo lo permite la migración
    `0004` (la CHECK de `event_type` de 0001 no lo incluía).
 6. **Concurrencia (anti-duplicados)**: la búsqueda+creación no es atómica
-   contra la API, por eso el app colapsa toda sincronización concurrente
-   (sync automático del arranque + Retry, o llamadas solapadas) a UNA sola
-   llamada remota vía **single-flight** (`src/services/loyverse/singleFlight.js`
-   → `loyverseCustomerService`). Y si el vínculo local no se graba
-   (`loyverse_customer_id` + `synced`), la Edge responde **502 retriable**
-   (en vez de éxito con el id "perdido") y el reintento rebusca y reusa el
-   mismo cliente remoto — reprobado como regresión en
-   `tests/loyverse-sync.test.mjs` y `tests/single-flight.test.mjs`.
+   contra la API, así que hay **dos barreras**:
+   - **Cliente**: el app colapsa toda sincronización concurrente (sync
+     automático del arranque + Retry, o llamadas solapadas) a UNA sola
+     llamada remota vía **single-flight**
+     (`src/services/loyverse/singleFlight.js` →
+     `loyverseCustomerService`).
+   - **Servidor (0006 + `_shared/syncClaim.js`)**: la Edge toma un **claim
+     atómico por fila** en `customers` (`loyverse_sync_claim` +
+     `loyverse_sync_claim_at`) con un UPDATE condicional en UNA sentencia
+     (`claim IS NULL OR claim_at < now() - interval '10 minutes'`). Solo
+     quien consigue `count = 1` continúa hacia la API de Loyverse; un segundo
+     UPDATE concurrente queda bloqueado por el lock de fila y re-evalúa el
+     WHERE sobre el commit → el **perdedor responde `409
+     loyverse_sync_in_progress` (`retriable: true`) sin llamar a la API**.
+     El claim se libera en `finally` y la liberación exige el token del dueño
+     (`loyverse_sync_claim = <uuid>`); un claim abandonado **expira a los 10
+     minutos** (`SYNC_CLAIM_LEASE_MS`) y la siguiente adquisición lo toma. Un
+     perfil ya `synced` responde `already_linked` antes de tocar claim/red.
+   - Y si el vínculo local no se graba (`loyverse_customer_id` + `synced`),
+     la Edge responde **502 retriable** (en vez de éxito con el id "perdido")
+     y el reintento rebusca y reusa el mismo cliente remoto; ante un error de
+     duplicado al crear (400/409/422, cualquier formato) se rebusca y vincula
+     (`afterDuplicateCode`). Validado con QA real concurrente — cubierto como
+     regresión en `tests/loyverse-sync.test.mjs`,
+     `tests/single-flight.test.mjs` y `tests/sync-claim.test.mjs`.
 
 Cambios de comportamiento esperado (documentados y cubiertos en tests):
 un cliente existente cuyo **teléfono difiere** del de Salmos ya no se vincula

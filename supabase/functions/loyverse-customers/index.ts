@@ -18,7 +18,7 @@
 // ---------------------------------------------------------------
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { createOrLinkLoyverseCustomer } from "../_shared/loyverseCore.js";
+import { runLoyverseSync } from "../_shared/syncClaim.js";
 
 const LOYVERSE_BASE = "https://api.loyverse.com/v1.0/customers";
 const LOYVERSE_PAGE_LIMIT = 250;
@@ -99,6 +99,34 @@ function createTransport(accessToken) {
   };
 }
 
+// Adaptador del claim hacia Supabase. `claim` = el UPDATE condicional
+// atómico de la migración 0006: mientras otro claim esté vigente (no
+// vencido), el WHERE no matchea y count llega 0 (perdedor). `release` =
+// liberación con scope auth_user_id + token (nunca borra un claim ajeno).
+function createClaimDb(supabase) {
+  return {
+    async claim({ authUserId, claim, claimAt, cutoffIso }) {
+      const { data, error } = await supabase
+        .from("customers")
+        .update({ loyverse_sync_claim: claim, loyverse_sync_claim_at: claimAt })
+        .eq("auth_user_id", authUserId)
+        .or(`loyverse_sync_claim.is.null,loyverse_sync_claim_at.lt.${cutoffIso}`)
+        .select("auth_user_id")
+        .maybeSingle();
+      if (error) throw error;
+      return { count: data ? 1 : 0 };
+    },
+    async release({ authUserId, claim }) {
+      const { error } = await supabase
+        .from("customers")
+        .update({ loyverse_sync_claim: null, loyverse_sync_claim_at: null })
+        .eq("auth_user_id", authUserId)
+        .eq("loyverse_sync_claim", claim);
+      return { error };
+    },
+  };
+}
+
 async function logSyncEvent(supabase, { authUserId, traceId, eventType, detail }) {
   await supabase.from("customer_sync_events").insert({
     auth_user_id: authUserId,
@@ -149,15 +177,15 @@ Deno.serve(async (req) => {
 
     const traceId = crypto.randomUUID();
 
-    // 1) Fila actual del cliente (idempotencia).
+    // 1) Fila actual del cliente (idempotencia y defaults). El caso
+    //    already_linked (ya vinculado + synced) se resuelve dentro de
+    //    runLoyverseSync ANTES de tomar el claim: un perfil synced no
+    //    toca la columna del claim ni llama a Loyverse.
     const { data: profile } = await supabase
       .from("customers")
       .select("*")
       .eq("auth_user_id", user.id)
       .maybeSingle();
-    if (profile?.loyverse_customer_id && profile?.loyverse_sync_status === "synced") {
-      return json({ ok: true, status: "already_linked", loyverseCustomerId: profile.loyverse_customer_id });
-    }
 
     const name = body.name || profile?.name || user.user_metadata?.name || "";
     const email = body.email || profile?.email || null;
@@ -169,14 +197,31 @@ Deno.serve(async (req) => {
     const transport = createTransport(loyverseAccessToken);
 
     try {
-      const result = await createOrLinkLoyverseCustomer({
+      const outcome = await runLoyverseSync({
+        db: createClaimDb(supabase),
         transport,
+        authUserId: user.id,
+        profile,
         name,
         email,
         phone,
         customerCode,
-        knownLoyverseCustomerId: profile?.loyverse_customer_id || null,
       });
+
+      if (outcome.status === "no_profile") {
+        return json({ ok: false, code: "customer_setup_required", traceId, retriable: false }, 409);
+      }
+      if (outcome.status === "already_linked") {
+        return json({ ok: true, status: "already_linked", loyverseCustomerId: outcome.loyverseCustomerId });
+      }
+      if (outcome.status === "busy") {
+        // Otro sync en curso (claim vigente): retriable y SIN llamar a
+        // Loyverse. El single-flight del frontend deduplica; este claim
+        // es la barrera server-side entre pestañas/instancias.
+        return json({ ok: false, code: "loyverse_sync_in_progress", traceId, retriable: true }, 409);
+      }
+
+      const result = outcome.result;
 
       if (result.status === "conflict") {
         await logSyncEvent(supabase, {

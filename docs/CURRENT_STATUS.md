@@ -32,6 +32,83 @@ Confirmado contra el repo local y remoto:
 
 ---
 
+## Actualización 2026-09-12 — Corrección de concurrencia Loyverse (sync claim) + QA real
+
+Hardening de la sincronización Loyverse contra la **condición de carrera** que
+históricamente creó clientes duplicados en Loyverse, validado con una **QA real
+concurrente** contra la Edge Function desplegada.
+
+- **Incidencia original (histórica, NO de esta implementación):** dos
+  invocaciones concurrentes de `loyverse-customers` podían leer el mismo perfil
+  `customers` como no sincronizado y **ambas** llegar a Loyverse a crear un
+  cliente. Eso produjo **dos clientes Loyverse duplicados** para el perfil QA
+  (`salmoscafe497@gmail.com`, `customer_code: SC-F8XJRZBS`):
+  - `c85906ca-25ce-482c-b486-c65d055f1b05`
+  - `39b8b3cc-6bff-46f0-91f0-7bdaa6575cfb`
+
+  Ambos son **históricos y no se eliminaron ni modificaron**; la corrección
+  previene duplicados nuevos, no limpia los existentes.
+- **Solución implementada — claim atómico server-side** (bloqueo por fila):
+  - `supabase/migrations/0006_loyverse_sync_claim.sql`: añade
+    `customers.loyverse_sync_claim` (uuid, token del holder) y
+    `customers.loyverse_sync_claim_at` (timestamptz, instante de toma). Sin
+    cambios de RLS/grants: la póliza `customers_own_all` ya autoriza el UPDATE
+    del dueño (la Edge actúa con el JWT del usuario).
+  - `supabase/functions/_shared/syncClaim.js` (`acquireSyncClaim` /
+    `releaseSyncClaim` / `runLoyverseSync`, agnóstico de transporte) integrado
+    en `supabase/functions/loyverse-customers/index.ts`.
+  - Adquisición **atómica en UNA sentencia** (`WHERE claim IS NULL OR
+    claim_at < now() - interval '10 minutes'`): un segundo UPDATE concurrente
+    bloquea en el lock de fila y re-evalúa el WHERE sobre el commit → 0 filas
+    para el perdedor.
+  - **Lease de 10 minutos** (`SYNC_CLAIM_LEASE_MS`): un claim abandonado
+    (crash / red caída / tab cerrado) expira y la siguiente adquisición lo
+    toma; el lease NO se reanuda en lecturas (un holder lento conserva su
+    claim salvo en el techo del lease).
+  - **Liberación exclusiva por token**: el WHERE de liberación exige
+    `loyverse_sync_claim = <token del dueño>`; tras un robo legítimo de un
+    claim vencido, el holder antiguo nunca pisa el claim nuevo.
+  - **Perdedor** → `HTTP 409`, `code: "loyverse_sync_in_progress"`,
+    `retriable: true`, **sin llamar a la API de Loyverse**.
+  - **Perfil ya `synced`** → `already_linked` antes de tocar el claim ni la red.
+  - Se conserva la **defensa adicional contra duplicados** del fix `b0351f5`:
+    si Loyverse responde un error de duplicado al crear (400/409/422, cualquier
+    formato) se rebusca y vincula (`afterDuplicateCode`), y una "creación" sin
+    `id` se trata como 502 retriable (nunca `synced` con id nulo).
+- **Desplegado:** migraciones `0001`–`0006` aplicadas en remoto; Edge Function
+  `loyverse-customers` redeployada (**version 3**, ACTIVE, `verify_jwt = true`).
+- **QA real concurrente (contra la función desplegada):** se resetearon las
+  columnas de sync del perfil QA (`loyverse_customer_id = NULL`,
+  `loyverse_sync_status = pending`, claim y claim_at NULL) y se lanzaron **dos
+  invocaciones simultáneas reales** con el payload válido
+  `{"operation":"link_or_create"}`:
+  - **Request A** → `409`, `code: "loyverse_sync_in_progress"`,
+    `retriable: true`, traceId `1e0795e1-065c-4820-be8f-9f4177ff6ec2`.
+  - **Request B** → `200`, `status: "linked"`,
+    `loyverseCustomerId: "c85906ca-25ce-482c-b486-c65d055f1b05"`.
+
+  Resultado: **solo una** invocación tomó el claim y continuó hacia Loyverse.
+- **Estado final verificado en Supabase:** `loyverse_customer_id =
+  c85906ca-25ce-482c-b486-c65d055f1b05`, `loyverse_sync_status = synced`,
+  `loyverse_sync_claim = NULL`, `loyverse_sync_claim_at = NULL` → enlace
+  exitoso, claim liberado, sin bloqueo activo.
+- **Eventos de sincronización verificados:** la QA produjo **1 nuevo**
+  `loyverse_linked` y **0 nuevos** `loyverse_created`. Los registros
+  `loyverse_created` preexistentes (2026-09-12T17:56:54Z) pertenecen a la
+  **incidencia histórica**, NO a esta implementación.
+- **Verificación directa en Loyverse:** `GET /v1.0/customers?email=
+  salmoscafe497@gmail.com` devuelve exactamente los **dos** clientes históricos
+  (`c85906ca-…` y `39b8b3cc-…`); la QA **no** creó ningún cliente adicional.
+- **Tests:** `npm test` → **130/130 pass** (10 nuevos en
+  `tests/sync-claim.test.mjs`).
+- **Estado git (sin commit ni push):** `HEAD b0351f5`; modificado
+  `supabase/functions/loyverse-customers/index.ts`; nuevos
+  `supabase/functions/_shared/syncClaim.js`,
+  `supabase/migrations/0006_loyverse_sync_claim.sql` y
+  `tests/sync-claim.test.mjs`.
+
+---
+
 ## Estado general
 
 - V1 de lealtad con **motor de fidelización real** en `src/services/` sobre
@@ -174,7 +251,9 @@ resolver para email) porque el anon no puede leer `customers` (RLS).
 - Tabla `public.customers` (0001): `auth_user_id` UNIQUE (1 auth_user = 1
   fila), `name`, `email`, `phone` (E.164 +52), `customer_code`
   (`SC-XXXXXXXX`, UNIQUE + CHECK formado), `loyverse_customer_id` (UNIQUE),
-  `loyverse_sync_status` (`pending|synced|failed|conflict`), `profile`
+  `loyverse_sync_status` (`pending|synced|failed|conflict`),
+  `loyverse_sync_claim` (uuid, token del claim de sync — 0006),
+  `loyverse_sync_claim_at` (timestamptz, instante de toma — 0006), `profile`
   (jsonb), `email_verified` (0002), timestamps. Trigger `set_updated_at`.
 - **RLS**: `customers_own_all` (solo `authenticated`, `auth.uid() =
   auth_user_id`). El anon no lee nada.
@@ -274,7 +353,11 @@ resolver para email) porque el anon no puede leer `customers` (RLS).
   `src/services/loyverse/singleFlight.js`, usado por
   `loyverseCustomerService`). Y la Edge Function propaga como 502 retriable
   cualquier fallo al grabar el vínculo local (`loyverse_customer_id`), en
-  vez de responder éxito con el id "perdido".
+  vez de responder éxito con el id "perdido". Además (0006): **claim atómico
+  server-side** por fila (`loyverse_sync_claim`/`_at`, `syncClaim.js`) —
+  dos invocaciones concurrentes del mismo perfil no pueden cruzar la
+  búsqueda+creación; el perdedor responde `409 loyverse_sync_in_progress`
+  (`retriable: true`) sin tocar la API de Loyverse.
 - **G) Cómo maneja conflictos** (`resolveLoyverseTarget`):
   - email→X y teléfono→Y (distintos) → **conflicto** `email_phone_conflict`
     (no crea un tercero).
@@ -318,19 +401,23 @@ resolver para email) porque el anon no puede leer `customers` (RLS).
 ## Edge Functions
 
 - Única función: **`loyverse-customers`** (TypeScript, `Deno.serve`).
-- **Desplegada en remoto**: `ACTIVE`, version 1, `verify_jwt = true`
-  (verificado con `supabase functions list`).
+- **Desplegada en remoto**: `ACTIVE`, **version 3**, `verify_jwt = true`
+  (verificado con `supabase functions list`; la v3 incluye
+  `syncClaim.js` + el fix `b0351f5`).
 - Variables esperadas en el proyecto: `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
   `LOYVERSE_ACCESS_TOKEN` (este último solo lado servidor).
 - Operación aceptada: `{ operation: "link_or_create" }`. Respuestas
   amigables: `already_linked | created | linked | updated | conflict`;
   errores con `traceId` (`srv_not_configured`, `unauthorized`,
   `invalid_body`, `invalid_operation`, `loyverse_customer_conflict`,
-  `loyverse_identity_conflict`, `loyverse_unavailable`). El `update`
-  (`PUT` parcial) y el evento `loyverse_updated` están en el código local;
-  la función desplegada en remoto es la versión 1 (create/link).
-- Shared code (`_shared/loyverseCore.js`) es agnóstico de Deno → se prueba
-  con `node --test`.
+  `loyverse_identity_conflict`, `loyverse_sync_in_progress`,
+  `loyverse_unavailable`). Concurrencia: adquiere el claim de `customers`
+  (0006) antes de tocar la API; si otro sync está en curso responde
+  `409 loyverse_sync_in_progress` (`retriable: true`) **sin** llamar a
+  Loyverse, y un perfil ya `synced` responde `already_linked` antes del
+  claim/red.
+- Shared code (`_shared/loyverseCore.js`, `_shared/syncClaim.js`) es agnóstico
+  de Deno → se prueba con `node --test`.
 
 ## Database Migrations
 
@@ -339,10 +426,13 @@ resolver para email) porque el anon no puede leer `customers` (RLS).
 | `0001_customers.sql` | `customers`, `customer_sync_events`, RLS, trigger `set_updated_at` | Remoto ✅ |
 | `0002_loyalty_schema.sql` | `email_verified`, `loyalty_cycles`, `loyalty_visits`, `rewards`, `audit_logs` (+RLS de solo lectura) | Remoto ✅ |
 | `0003_auth_alias_rpc.sql` | RPC `resolve_email_for_login` (login por alias) + RPC `phone_is_registered` (pre-chequeo) + índices email/teléfono | Remoto ✅ |
-| `0004_loyverse_updated_event.sql` | Amplía la CHECK de `customer_sync_events.event_type` para permitir `loyverse_updated` (drop + add del constraint) | Local ✅ (validada en Postgres descartable) / **Remoto ⏳ pendiente de `db push`** |
+| `0004_loyverse_updated_event.sql` | Amplía la CHECK de `customer_sync_events.event_type` para permitir `loyverse_updated` (drop + add del constraint) | Remoto ✅ |
+| `0005_loyalty_engine.sql` | `assert_loyalty_actor` + RPCs de lealtad (`register_visit`/`cancel_visit`/`redeem_reward`), grants solo `service_role` | Remoto ✅ |
+| `0006_loyverse_sync_claim.sql` | Claim atómico de sync Loyverse: `customers.loyverse_sync_claim` (uuid) + `customers.loyverse_sync_claim_at` (timestamptz); sin cambios de RLS/grants | Remoto ✅ |
 
 Regla: **no** crear una migración nueva para reemplazar 0003 (ya aplicada en
-remoto); los cambios van en `0004+` (esta Fase C usa `0004`).
+remoto); los cambios van en `0004+` (esta Fase C usa `0004`; el claim de
+concurrencia usa `0006`).
 
 ### RPCs
 
@@ -386,13 +476,18 @@ remoto); los cambios van en `0004+` (esta Fase C usa `0004`).
   para llamadas concurrentes, nueva ejecución tras terminar, liberación
   del slot tras rechazo, dedup a nivel servicio (mismo resultado), perfil
   ya vinculado → `already_synced` sin red.
+- `tests/sync-claim.test.mjs` (10): sync normal (adquiere el claim, crea en
+  Loyverse y lo libera al final), `already_linked` sin claim ni red,
+  `no_profile`, carrera con claim → solo una invocación llega al create,
+  perdedor `busy` retriable sin llamadas a Loyverse, claim liberado tras
+  éxito y la siguiente sync reusa el mismo cliente.
 - `tests/auth.test.mjs` (25): registro, login email/teléfono (E.164 y 10
   dígitos), duplicados, bounds de contraseña/email, recuperación OTP
   completa, `checkSecondaryContact` (teléfono/email en uso, 10 dígitos),
   Google, error temporal.
 
-Total corriente: **120/120 pass** (25 auth + 13 loyalty + 26 loyverse-sync
-+ 5 single-flight + 45 loyalty-engine + 6 navigation).
+Total corriente: **130/130 pass** (25 auth + 13 loyalty + 26 loyverse-sync
++ 5 single-flight + 45 loyalty-engine + 6 navigation + 10 sync-claim).
 
 ## Real End-to-End Tests
 
@@ -413,8 +508,33 @@ Se registró un segundo cliente: **Carlos Rivera** (`salmoscafe497@gmail.com`):
   Salmos.
 - Camino verificado: `new customer → create + link`.
 
-Conclusión: ambos caminos de sincronización están comprobados en ambiente
-real (además de cubiertos por las unidades de `tests/loyverse-sync.test.mjs`).
+> **Nota (snapshot histórico).** Los datos de esta prueba —email
+> `salmoscafe497@gmail.com`, nombre "Carlos Rivera" y `customer_code
+> SC-EJ8D2E4D`— corresponden al estado registrado en su fecha y **no deben
+> utilizarse como fuente del estado actual**: para el mismo email existe un
+> registro QA posterior con `customer_code: SC-F8XJRZBS` y dos clientes
+> Loyverse históricos (`c85906ca-…` y `39b8b3cc-…`). La prueba se conserva
+> tal cual como snapshot; el estado actual de la incidencia de concurrencia
+> está documentado en la **Actualización 2026-09-12** de este documento.
+
+**PRUEBA 3 — Concurrencia (QA real contra la función desplegada, 2026-09-12)**
+El perfil QA (`salmoscafe497@gmail.com`) se resetearon a `pending` +
+claim NULL y se lanzaron **dos invocaciones simultáneas reales** con
+`{"operation":"link_or_create"}`:
+- Request A → `409` `loyverse_sync_in_progress` (`retriable: true`, traceId
+  `1e0795e1-065c-4820-be8f-9f4177ff6ec2`).
+- Request B → `200` `status: "linked"`, `loyverseCustomerId:
+  c85906ca-25ce-482c-b486-c65d055f1b05`.
+
+Solo UNA invocación tomó el claim y llegó a Loyverse. Estado final: `synced`,
+claim `NULL`; **1** nuevo `loyverse_linked`, **0** nuevos `loyverse_created`;
+en Loyverse siguen existiendo exactamente los 2 clientes históricos del perfil
+(sin cliente adicional).
+
+Conclusión: los caminos crear/vincular y la defensa de concurrencia (claim
+atómico server-side) están comprobados en ambiente real (además de cubiertos
+por las unidades de `tests/loyverse-sync.test.mjs` y
+`tests/sync-claim.test.mjs`).
 
 ## Security
 

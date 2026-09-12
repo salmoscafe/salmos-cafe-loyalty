@@ -43,6 +43,34 @@ Cambios **solo de presentación**, sin tocar ningún servicio de auth:
 - Consistencia tipográfica: `.sc-eyebrow-plain`/`.sc-auth-eyebrow` unificados; `.sc-auth-switch` ahora tiene estilos explícitos.
 - **Contrato de auth intacto**: `authService.signInWithGoogle()`, `devSetGoogleMode` y todo el facade mock/real sin cambios — `tests/auth.test.mjs` (Google existente/nuevo) sigue pasando. `npm test` → **112/112** · `npm run build` OK · **sin deploy**.
 
+### Actualización (2026-09-12) — hardening de concurrencia Loyverse (registro)
+
+Registro formal de la corrección de la condición de carrera de la
+sincronización de clientes con Loyverse y de su validación en producción
+(no es una re-auditoría; complementa `docs/CURRENT_STATUS.md`):
+
+- **Problema histórico:** dos invocaciones concurrentes de `loyverse-customers`
+  podían cruzar sus búsquedas y crear un **cliente duplicado** en Loyverse (2
+  duplicados históricos en el perfil QA; se conservan tal cual, no se tocan).
+- **Fix:** migración `0006` (claim atómico `loyverse_sync_claim` /
+  `loyverse_sync_claim_at` en `customers`) + `_shared/syncClaim.js` +
+  `index.ts`. Perdedor → `409 loyverse_sync_in_progress` (`retriable: true`)
+  sin llamar a la API; lease de 10 min; liberación solo por el token del
+  dueño; `already_linked` antes del claim.
+- **Despliegue:** migraciones `0001`–`0006` aplicadas en remoto y Edge Function
+  `loyverse-customers` redeployada (**v3**, ACTIVE, `verify_jwt = true`) →
+  avanza el cierre de despliegue pendiente descrito en §§8/11 y en el plan
+  AUTH-7 (0004 y 0005 quedan aplicadas).
+- **QA real concurrente:** dos invocaciones simultáneas con
+  `{"operation":"link_or_create"}` → A: `409` (traceId
+  `1e0795e1-…ff6ec2`); B: `200` `linked` a `c85906ca-…`; **1** nuevo
+  `loyverse_linked`, **0** `loyverse_created`.
+- **Tests:** `npm test` → **130/130** (10 en `tests/sync-claim.test.mjs`).
+
+> El cuerpo de esta auditoría (fecha 2026-09-11, commit `86b364f`) refleja el
+> estado de su fecha; esta sección es la actualización que la supera en lo que
+> respecta a despliegue y concurrencia.
+
 ---
 
 ## 1. Resumen ejecutivo
