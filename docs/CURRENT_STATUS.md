@@ -20,7 +20,8 @@ Confirmado contra el repo local y remoto:
 - **Navegación por pathname, sin dependencias nuevas**: `src/lib/navigation.js` (`resolveAppMode`/`modePath`) + listener `popstate` en `App.jsx`. `/` → Cliente, `/Staff` → Staff, `/Admin` → Admin. URL directa funciona tras recargar (fallback SPA de Vite dev).
 - **Espacio del switcher eliminado**: `.sc-phone` ya no reserva `margin-top` (ni el `40px` del media query); no queda espacio artificial debajo de la parte superior.
 - **UI Auth limpia**:
-  - Login: título serif **"Bienvenido"** (el logo ya comunica la marca) + subtítulo secundario **"Entra a tu tarjeta"**.
+  - Login: título serif **"Bienvenido"** como único titular (el logo ya
+    comunica la marca; el subtítulo "Entra a tu tarjeta" se eliminó).
   - Eyebrows unificados: `.sc-eyebrow-plain` y `.sc-auth-eyebrow` comparten regla (OTP/reset intactos).
   - `.sc-auth-switch` ahora tiene definición CSS consistente (antes heredaba de `<p>`).
   - Logo con más aire arriba vía `padding-top` consistente en `.sc-auth`.

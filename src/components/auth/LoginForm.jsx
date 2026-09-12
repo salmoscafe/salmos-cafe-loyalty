@@ -25,7 +25,6 @@ export function LoginForm({ onLogin, onGoToRegister, onForgotPassword, onGoogle,
   return (
     <div className="sc-auth-login">
       <h1 className="sc-hero-title">Bienvenido</h1>
-      <p className="sc-login__sub">Entra a tu tarjeta</p>
 
       <form onSubmit={handleSubmit} className="sc-login__form">
         <Field label="Correo o teléfono">

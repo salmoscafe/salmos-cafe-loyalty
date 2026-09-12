@@ -83,8 +83,8 @@ del mismo layout.
   Enlace "¿Olvidaste tu contraseña?" debajo.
 - **Botones:** `Iniciar sesión` (primario) · `Continuar con Google`
   (secundario) · enlace "¿No tienes cuenta? Regístrate aquí".
-- **Mensajes:** título serif "Bienvenido" (el logo comunica Salmos Café) +
-  subtítulo secundario "Entra a tu tarjeta". En demo, caja de
+- **Mensajes:** título serif "Bienvenido" (el logo comunica Salmos Café),
+  sin subtítulo. En demo, caja de
   credenciales de prueba.
 - **Siguiente paso:** credenciales correctas → `provisioning`; error →
   banner inline (inválidas, correo sin confirmar con opción "Reenviar

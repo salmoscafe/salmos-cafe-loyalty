@@ -37,7 +37,7 @@ Aplicación parcial de **AUTH-1** (Google OAuth) y **AUTH-2** (SMTP + plantillas
 
 Cambios **solo de presentación**, sin tocar ningún servicio de auth:
 
-- Título del login: **"Bienvenido"** (Instrument Serif) + subtítulo secundario "Entra a tu tarjeta" (el logo comunica Salmos Café).
+- Título del login: **"Bienvenido"** (Instrument Serif) como único titular (el logo comunica Salmos Café; el subtítulo "Entra a tu tarjeta" se eliminó).
 - **Icono oficial de Google** inline (SVG en `src/components/common/icons.jsx`, `Icon.Google`); `SecondaryButton` acepta un `icon` opcional conservando altura/tipografía/borde/radius.
 - Navegación por **pathname** (`/`, `/Staff`, `/Admin`) en `src/lib/navigation.js`; el selector de demo Cliente/Staff/Admin fue eliminado.
 - Consistencia tipográfica: `.sc-eyebrow-plain`/`.sc-auth-eyebrow` unificados; `.sc-auth-switch` ahora tiene estilos explícitos.
