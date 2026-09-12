@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { AuthMessage } from "./AuthMessage.jsx";
 import { Field, PrimaryButton, SecondaryButton } from "../common/ui.jsx";
+import { Icon } from "../common/icons.jsx";
 import { authService } from "../../services/index.js";
 
 // Formulario de inicio de sesión: identificador (correo o teléfono) +
@@ -23,9 +24,8 @@ export function LoginForm({ onLogin, onGoToRegister, onForgotPassword, onGoogle,
 
   return (
     <div className="sc-auth-login">
-      <p className="sc-eyebrow-plain">Bienvenido a Salmos Café</p>
-      <h1 className="sc-hero-title">Entra a tu tarjeta</h1>
-      <p className="sc-login__sub">Inicia sesión con tu correo o teléfono y tu contraseña.</p>
+      <h1 className="sc-hero-title">Bienvenido</h1>
+      <p className="sc-login__sub">Entra a tu tarjeta</p>
 
       <form onSubmit={handleSubmit} className="sc-login__form">
         <Field label="Correo o teléfono">
@@ -87,7 +87,7 @@ export function LoginForm({ onLogin, onGoToRegister, onForgotPassword, onGoogle,
 
       <div className="sc-auth-divider"><span>o</span></div>
 
-      <SecondaryButton type="button" onClick={onGoogle} disabled={loading}>
+      <SecondaryButton type="button" onClick={onGoogle} disabled={loading} icon={<Icon.Google />}>
         Continuar con Google
       </SecondaryButton>
 

@@ -17,6 +17,7 @@ hasta migrarlo a Supabase. **No está "production complete".**
 - ✅ Base funcional: app + motor de fidelización real (reglas verificadas por tests).
 - ✅ Autenticación de cliente en Supabase (correo/teléfono + contraseña, OTP solo para recuperación, Google).
 - ✅ Sincronización Loyverse: crear, vincular y **actualizar conservadoramente** a clientes existentes (Fase C — código y tests terminados).
+- ✅ **Navegación real por URL** (`/`, `/Staff`, `/Admin`) y **UI de Cliente/Auth limpia** (sin selector de demo; login "Bienvenido"; icono de Google).
 - ⚠️ **Deployment pendiente**: la migración `0004` y la Edge Function `loyverse-customers` actualizada aún **no** se han aplicado al ambiente real.
 - ⏳ Siguiente paso: migrar el motor de lealtad a Supabase.
 
@@ -69,8 +70,9 @@ Ver `tests/loyalty.test.mjs`, `tests/loyverse-sync.test.mjs` y
 
 ## Tests / calidad
 
-- **61 tests pasando** (`npm test`): motor de lealtad, flujo de auth y
-  sincronización Loyverse (crear/vincular/actualizar/conflicto).
+- **112 tests pasando** (`npm test`): motor de lealtad, flujo de auth,
+  sincronización Loyverse (crear/vincular/actualizar/conflicto) y
+  navegación por pathname.
 - `npm run build` compila sin errores (hay un aviso **preexistente** de
   tamaño de chunk de Vite > 500 kB, no introducido por Fase C).
 - `npm audit` reporta **0 vulnerabilidades**.
@@ -83,10 +85,11 @@ npm run dev
 npm test        # motor de fidelización + sync Loyverse, sin navegador
 ```
 
-Abre la URL que imprime Vite. Verás un selector "Cliente / Staff / Admin"
-flotando arriba — **eso es una herramienta de desarrollo**, no un feature
-del producto. En producción son experiencias separadas, cada una con su
-propio guard de autenticación.
+Abre la URL que imprime Vite. Cada experiencia se elige por la URL,
+**no por un selector**: `/` es **Cliente**, `/Staff` es **Staff** y
+`/Admin` es **Admin** (la SPA resuelve la primera ruta del pathname, sin
+dependencia de router). En producción son experiencias separadas, cada
+una con su propio guard de autenticación.
 
 Sin `.env`, el cliente corre en **modo demo** (auth mock en memoria).
 Con `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` en `.env`, el registro
@@ -261,11 +264,13 @@ src/
     utils/env.js           única lectura del entorno (Vite / tests)
     phone.js               teléfonos E.164 +52 (normalización, validación)
     delay.js               util de pausa simulada
-  App.jsx                  orquestador raíz + el selector de modo (dev-only)
+    navigation.js          resolución de experiencia por pathname (/ /Staff /Admin)
+  App.jsx                  orquestador raíz + resolución de experiencia por URL
   styles.css               identidad visual completa (paleta real del logo)
 tests/loyalty.test.mjs      suite del motor de fidelización (node --test)
 tests/loyverse-sync.test.mjs  lógica de sync Loyverse (normalización y conflicto)
 tests/auth.test.mjs         suite del flujo de auth (contraseña + recuperación OTP)
+tests/navigation.test.mjs   suite de navegación por pathname (sin router)
 ```
 
 ## Regla que gobierna todo el código

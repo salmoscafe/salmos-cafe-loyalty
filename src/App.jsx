@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import "./styles.css";
+import { resolveAppMode } from "./lib/navigation.js";
 
 import { authService, salesService, ManualSalesAdapter } from "./services/index.js";
 import { getCardForCustomer } from "./services/index.js";
@@ -30,30 +31,26 @@ import { AdminCustomers } from "./screens/admin/Customers.jsx";
 import { ComingSoon } from "./screens/admin/ComingSoon.jsx";
 
 /* =========================================================
-   Root — en producción, Cliente / Staff / Admin son três
-   despliegues o rutas separadas (distinto dominio o distinto
-   guard de auth), no una decisión que tome el propio frontend
-   en tiempo de ejecución. El selector de abajo existe SOLO
-   para poder enseñar los tres flujos en esta demo — no debe
-   sobrevivir a la Fase 1 tal cual.
+   Root — Cliente / Staff / Admin son tres experiencias
+   separadas por pathname (sin router):
+     /        → Cliente    /Staff → Staff    /Admin → Admin
+   En producción cada una vive en un despliegue/dominio o guard
+   de auth propio; la resolución aquí es solo de navegación.
    ========================================================= */
 export default function App() {
-  const [appMode, setAppMode] = useState("client");
+  const [path, setPath] = useState(() => window.location.pathname);
+
+  useEffect(() => {
+    const onNavigate = () => setPath(window.location.pathname);
+    window.addEventListener("popstate", onNavigate);
+    return () => window.removeEventListener("popstate", onNavigate);
+  }, []);
+
+  const appMode = resolveAppMode(path);
 
   return (
     <div className="sc-root">
       <div className="sc-ambient" aria-hidden="true" />
-      <div className="sc-dev-switcher">
-        {["client", "staff", "admin"].map((m) => (
-          <button
-            key={m}
-            className={"sc-dev-switcher__btn" + (appMode === m ? " sc-dev-switcher__btn--active" : "")}
-            onClick={() => setAppMode(m)}
-          >
-            {m === "client" ? "Cliente" : m === "staff" ? "Staff" : "Admin"}
-          </button>
-        ))}
-      </div>
 
       {appMode === "client" && <ClientApp />}
       {appMode === "staff" && <StaffApp />}

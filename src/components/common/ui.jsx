@@ -39,9 +39,10 @@ export function PrimaryButton({ children, ...props }) {
   );
 }
 
-export function SecondaryButton({ children, ...props }) {
+export function SecondaryButton({ icon, children, ...props }) {
   return (
     <button className="sc-btn-secondary" {...props}>
+      {icon && <span className="sc-btn-secondary__icon" aria-hidden="true">{icon}</span>}
       {children}
     </button>
   );

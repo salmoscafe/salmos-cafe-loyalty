@@ -37,33 +37,6 @@
     var(--cream-light);
 }
 
-.sc-dev-switcher {
-  position: fixed;
-  top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 60;
-  display: flex;
-  gap: 4px;
-  background: #fff;
-  border: 1px solid var(--line);
-  border-radius: 100px;
-  padding: 4px;
-  box-shadow: 0 6px 18px -8px rgba(16,15,15,0.25);
-}
-.sc-dev-switcher__btn {
-  border: none;
-  background: none;
-  font-size: 12px;
-  font-weight: 600;
-  padding: 6px 12px;
-  border-radius: 100px;
-  cursor: pointer;
-  color: var(--ink);
-  opacity: 0.5;
-}
-.sc-dev-switcher__btn--active { opacity: 1; background: var(--navy); color: var(--cream); }
-
 /* ---- Phone shell ---- */
 .sc-phone {
   position: relative;
@@ -77,10 +50,9 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  margin-top: 44px;
 }
 @media (max-width: 460px) {
-  .sc-phone { border-radius: 0; min-height: 100vh; box-shadow: none; margin-top: 40px; }
+  .sc-phone { border-radius: 0; min-height: 100vh; box-shadow: none; }
   .sc-root { padding: 0; }
 }
 
@@ -99,7 +71,7 @@
 
 .sc-screen { display: flex; flex-direction: column; gap: 18px; padding-bottom: 8px; }
 
-.sc-eyebrow-plain { font-size: 12.5px; color: var(--espresso); opacity: 0.6; margin: 6px 0 2px; }
+.sc-eyebrow-plain, .sc-auth-eyebrow { font-size: 12.5px; color: var(--espresso); opacity: 0.6; margin: 6px 0 2px; }
 .sc-hero-copy { padding-top: 4px; }
 .sc-hero-title {
   font-family: 'Instrument Serif', serif;
@@ -175,11 +147,17 @@
 .sc-btn-primary:disabled { opacity: 0.6; cursor: default; }
 
 .sc-btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
   border: 1.5px solid var(--line); background: transparent; color: var(--ink);
   font-family: 'Inter', sans-serif; font-size: 14px; font-weight: 600;
   padding: 13px; border-radius: 14px; cursor: pointer; width: 100%;
 }
 .sc-btn-secondary:active { transform: scale(0.98); }
+.sc-btn-secondary__icon { display: inline-flex; flex-shrink: 0; }
+.sc-btn-secondary__icon svg { width: 18px; height: 18px; }
 
 .sc-hint { text-align: center; font-size: 12.5px; opacity: 0.5; margin: 0; }
 
@@ -352,13 +330,12 @@
 }
 
 /* ---- Auth (Login/Registro) ---- */
-.sc-auth { align-items: stretch; }
+.sc-auth { align-items: stretch; padding-top: 40px; }
 .sc-auth-identify, .sc-auth-new-details, .sc-auth-otp { display: flex; flex-direction: column; gap: 14px; }
 .sc-auth-notice {
   background: rgba(31,51,85,0.06); color: var(--navy); border-radius: 12px;
   padding: 10px 14px; font-size: 12.5px; text-align: center; margin: 0 0 4px;
 }
-.sc-auth-eyebrow { font-size: 12.5px; color: var(--espresso); opacity: 0.65; margin: 0; }
 .sc-auth-sub { font-size: 13.5px; opacity: 0.65; margin: 0 0 4px; line-height: 1.4; }
 .sc-auth-hint { font-size: 12.5px; opacity: 0.55; text-align: center; margin: 0; }
 
@@ -400,6 +377,14 @@
 .sc-otp-box--error { border-color: #A6413A; }
 .sc-auth-otp__actions { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-top: 4px; }
 .sc-auth-link { border: none; background: none; color: var(--navy); font-size: 12.5px; font-weight: 600; cursor: pointer; padding: 0; }
+.sc-auth-switch {
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--ink);
+  opacity: 0.65;
+  margin: 16px 0 0;
+  line-height: 1.5;
+}
 
 .sc-demo-box__pills { display: flex; flex-wrap: wrap; gap: 8px; }
 .sc-pill {

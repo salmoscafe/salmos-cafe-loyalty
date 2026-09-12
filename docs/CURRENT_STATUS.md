@@ -7,7 +7,27 @@ Loyverse"** implementada (código listo, **sin commit ni push**). Todo lo
 documentado aquí fue verificado contra el código real y el proyecto remoto;
 nada se da por sentado de la documentación.
 
-Última actualización: 2026-09-10.
+Última actualización: 2026-09-11.
+
+---
+
+## Actualización 2026-09-11 — UI Cleanup + Routing (UI/Routing phase)
+
+Confirmado contra el repo local y remoto:
+
+- **HEAD**: `6c0183b` (`feat: implement loyalty engine edge function`) · branch `main` · remote `salmoscafe/salmos-cafe-loyalty`.
+- **Switcher de demo Cliente/Staff/Admin eliminado.** Ya no existe en `App.jsx` ni en `styles.css` (`.sc-dev-switcher`, `.sc-dev-switcher__btn*` removidos).
+- **Navegación por pathname, sin dependencias nuevas**: `src/lib/navigation.js` (`resolveAppMode`/`modePath`) + listener `popstate` en `App.jsx`. `/` → Cliente, `/Staff` → Staff, `/Admin` → Admin. URL directa funciona tras recargar (fallback SPA de Vite dev).
+- **Espacio del switcher eliminado**: `.sc-phone` ya no reserva `margin-top` (ni el `40px` del media query); no queda espacio artificial debajo de la parte superior.
+- **UI Auth limpia**:
+  - Login: título serif **"Bienvenido"** (el logo ya comunica la marca) + subtítulo secundario **"Entra a tu tarjeta"**.
+  - Eyebrows unificados: `.sc-eyebrow-plain` y `.sc-auth-eyebrow` comparten regla (OTP/reset intactos).
+  - `.sc-auth-switch` ahora tiene definición CSS consistente (antes heredaba de `<p>`).
+  - Logo con más aire arriba vía `padding-top` consistente en `.sc-auth`.
+  - Botón Google con **icono oficial inline** (SVG en `icons.jsx`); `SecondaryButton` acepta `icon` (misma altura/tipografía/borde/radius).
+- **Sin cambios de lógica**: authService (incluido `signInWithGoogle` y `devSetGoogleMode`, usados por `tests/auth.test.mjs`), Loyverse/Fase C, D1.1/D1.2-1 y migraciones 0001–0005 intactos. `.env.example` fuera del commit. **Sin deploy.**
+- **Tests**: `npm test` → **112/112** (106 previos + 6 nuevos de navegación en `tests/navigation.test.mjs`). `npm run build` → OK (aviso de chunk >500 kB preexistente). `git diff --check` limpio.
+- Commit de la fase: `feat: refine auth ui and app navigation` (ver sección Git/GitHub abajo).
 
 ---
 
@@ -29,9 +49,10 @@ nada se da por sentado de la documentación.
 ## Arquitectura actual
 
 - **React 18 + Vite 6** (`@vitejs/plugin-react`), SPA tipo app móvil
-  (Cliente), flujos Staff y Admin en el mismo bundle con selector
-  **dev-only** en `App.jsx` (tres despliegues/productos separados en
-  producción).
+  (Cliente), flujos Staff y Admin en el mismo bundle. La experiencia se
+  resuelve por **pathname** (`/`, `/Staff`, `/Admin`) en
+  `src/lib/navigation.js` — tres despliegues/productos separados en
+  producción (ver "Actualización 2026-09-11" al inicio).
 - **Separación UI / services**: las pantallas importan SOLO de
   `src/services/index.js` (barrel único). Los servicios son async y de una
   sola responsabilidad; no importan componentes.
@@ -83,6 +104,11 @@ docs/   AUTH_AND_LOYVERSE_FLOW.md · CURRENT_STATUS.md (este documento)
 ```
 
 ## Git / GitHub
+
+> Nota: esta subsección describe el checkpoint histórico (Fase C). El
+> estado actual (HEAD `6c0183b`, fase UI/Routing commiteada y pushed, sin
+> `.env.example` en staging) está en la **Actualización 2026-09-11** al
+> inicio de este documento.
 
 - **Branch**: `main`
 - **HEAD**: `0b3f41ba99904febdf04cb1c5cfbf1f7e0eee722`
@@ -343,7 +369,8 @@ remoto); los cambios van en `0004+` (esta Fase C usa `0004`).
   completa, `checkSecondaryContact` (teléfono/email en uso, 10 dígitos),
   Google, error temporal.
 
-Total corriente: **61/61 pass** (25 auth + 13 loyalty + 23 loyverse-sync).
+Total corriente: **112/112 pass** (25 auth + 13 loyalty + 23 loyverse-sync
++ 45 loyalty-engine + 6 navigation).
 
 ## Real End-to-End Tests
 

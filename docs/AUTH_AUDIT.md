@@ -33,6 +33,16 @@ Aplicación parcial de **AUTH-1** (Google OAuth) y **AUTH-2** (SMTP + plantillas
 
 **Cadena para producción (al tener dominio y credenciales):** (1) descomentar `[auth.external.google]` y `[auth.email.smtp]` en `config.toml` y rellenar `.env` (gitignored); (2) replicar en el dashboard remoto (`Authentication → Providers / SMTP / Email Templates`); (3) definir en producción `site_url` + `additional_redirect_urls` y los redirects de Google Cloud Console; (4) confirmar `enable_confirmations` ON/OFF (decisión §17). Los templates aplican igual en local y remoto.
 
+### Actualización UI (2026-09-11) — limpieza de presentación del login
+
+Cambios **solo de presentación**, sin tocar ningún servicio de auth:
+
+- Título del login: **"Bienvenido"** (Instrument Serif) + subtítulo secundario "Entra a tu tarjeta" (el logo comunica Salmos Café).
+- **Icono oficial de Google** inline (SVG en `src/components/common/icons.jsx`, `Icon.Google`); `SecondaryButton` acepta un `icon` opcional conservando altura/tipografía/borde/radius.
+- Navegación por **pathname** (`/`, `/Staff`, `/Admin`) en `src/lib/navigation.js`; el selector de demo Cliente/Staff/Admin fue eliminado.
+- Consistencia tipográfica: `.sc-eyebrow-plain`/`.sc-auth-eyebrow` unificados; `.sc-auth-switch` ahora tiene estilos explícitos.
+- **Contrato de auth intacto**: `authService.signInWithGoogle()`, `devSetGoogleMode` y todo el facade mock/real sin cambios — `tests/auth.test.mjs` (Google existente/nuevo) sigue pasando. `npm test` → **112/112** · `npm run build` OK · **sin deploy**.
+
 ---
 
 ## 1. Resumen ejecutivo
