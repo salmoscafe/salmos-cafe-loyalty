@@ -4,6 +4,14 @@ Diseño aprobado de los 5 emails de Salmos Café. Este documento responde
 una sola pregunta: **cómo deben verse y qué deben decir**. No es una
 guía de implementación.
 
+> **Implementación (fuente única):** las plantillas finales viven en
+> `email-templates/` (`confirm-signup.html`, `reset-password.html`,
+> `otp.html`, `change-email.html`, `welcome.html` + `assets/`), y se
+> mapean a los type keys de Supabase en `supabase/config.toml`
+> (content_path relativo a la raíz del repo). No duplicar copias bajo
+> `supabase/`. El footer lleva el eslogan de marca:
+> **"Donde el café es un verso al paladar."**
+
 ---
 
 ## Sistema visual compartido
@@ -44,8 +52,8 @@ aplica— la caja especial (botón u OTP).
 ├───────────────────────────────────────────┤
 │                                             │
 │              Salmos Café                    │   ← wordmark pequeño, itálica,
-│        Tu café, tus visitas,                │      espresso sobre crema clara
-│           tus recompensas.                  │
+│        Donde el café es                     │      espresso sobre crema clara
+│        un verso al paladar.                 │
 │                                             │
 │   Este correo se envió porque hubo una      │   ← una sola línea, gris, casi
 │   acción en tu cuenta de Salmos Café.       │      ilegible a propósito
@@ -109,8 +117,8 @@ va al final, después de la acción principal — nunca antes.
 │                                             │
 ├───────────────────────────────────────────┤
 │              Salmos Café                    │
-│        Tu café, tus visitas,                │
-│           tus recompensas.                  │
+│        Donde el café es                     │
+│        un verso al paladar.                 │
 └───────────────────────────────────────────┘
 ```
 
@@ -151,8 +159,8 @@ va al final, después de la acción principal — nunca antes.
 │                                             │
 ├───────────────────────────────────────────┤
 │              Salmos Café                    │
-│        Tu café, tus visitas,                │
-│           tus recompensas.                  │
+│        Donde el café es                     │
+│        un verso al paladar.                 │
 └───────────────────────────────────────────┘
 ```
 
@@ -201,8 +209,8 @@ la caja del código y una sola línea antes, una sola línea después.
 │                                             │
 ├───────────────────────────────────────────┤
 │              Salmos Café                    │
-│        Tu café, tus visitas,                │
-│           tus recompensas.                  │
+│        Donde el café es                     │
+│        un verso al paladar.                 │
 └───────────────────────────────────────────┘
 ```
 
@@ -242,8 +250,8 @@ la caja del código y una sola línea antes, una sola línea después.
 │                                             │
 ├───────────────────────────────────────────┤
 │              Salmos Café                    │
-│        Tu café, tus visitas,                │
-│           tus recompensas.                  │
+│        Donde el café es                     │
+│        un verso al paladar.                 │
 └───────────────────────────────────────────┘
 ```
 
@@ -284,8 +292,8 @@ sigue habiendo un solo botón y ninguna promoción.
 │                                             │
 ├───────────────────────────────────────────┤
 │              Salmos Café                    │
-│        Tu café, tus visitas,                │
-│           tus recompensas.                  │
+│        Donde el café es                     │
+│        un verso al paladar.                 │
 └───────────────────────────────────────────┘
 ```
 

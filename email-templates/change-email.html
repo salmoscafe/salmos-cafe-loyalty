@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="es" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="color-scheme" content="light">
+<meta name="supported-color-schemes" content="light">
+<title>Confirma tu nuevo correo en Salmos Café</title>
+<!--[if mso]>
+<style>
+  table { border-collapse: collapse; }
+  .fallback-font { font-family: Georgia, 'Times New Roman', serif !important; }
+</style>
+<![endif]-->
+<style>
+  body, table, td { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+  img { border: 0; line-height: 100%; outline: none; text-decoration: none; -ms-interpolation-mode: bicubic; }
+  table { border-collapse: collapse !important; }
+  body { margin: 0; padding: 0; width: 100% !important; background-color: #F5EEE2; }
+  @media only screen and (max-width: 600px) {
+    .sc-container { width: 100% !important; }
+    .sc-px { padding-left: 20px !important; padding-right: 20px !important; }
+  }
+</style>
+</head>
+<body style="margin:0; padding:0; background-color:#F5EEE2;">
+  <!-- Preheader -->
+  <div style="display:none; max-height:0; overflow:hidden; mso-hide:all; font-size:1px; line-height:1px; color:#F5EEE2;">
+    Confirma este cambio para seguir usando tu cuenta.
+  </div>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F5EEE2;">
+    <tr>
+      <td align="center" style="padding: 32px 16px;">
+
+        <table role="presentation" class="sc-container" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px; max-width:600px; background-color:#FFFFFF; border-radius:16px; overflow:hidden;">
+
+          <!-- HEADER -->
+          <tr>
+            <td align="center" style="background-color:#1F3355; padding: 32px 24px;">
+              <!-- [LOGO_URL_PROVISIONAL] URL pública del wordmark — PROVISIONAL, aún no disponible.
+                   Cuando se publique el dominio, hospedar email-templates/assets/wordmark-cream.png
+                   en esta ruta y retirar este comentario. No usar ruta relativa en emails de Supabase. -->
+              <img src="https://raw.githubusercontent.com/salmoscafe/salmos-cafe-loyalty/main/email-templates/assets/wordmark-cream.png" width="180" height="58" alt="Salmos Café" style="display:block; border:0;">
+            </td>
+          </tr>
+
+          <!-- CONTENIDO -->
+          <tr>
+            <td class="sc-px" style="padding: 40px 32px 8px;">
+              <h1 style="margin:0 0 16px; font-family: Georgia, 'Times New Roman', serif; font-style: italic; font-weight: normal; font-size: 26px; line-height:1.25; color:#1F3355;">
+                Confirma tu nuevo correo
+              </h1>
+              <p style="margin:0 0 24px; font-family: Arial, Helvetica, sans-serif; font-size: 15px; line-height:1.6; color:#100F0F;">
+                Solicitaste cambiar el correo de tu cuenta de Salmos Café. Confirma esta dirección para completar el cambio.
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td class="sc-px" style="padding: 0 32px 28px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td align="center" style="background-color:#1F3355; border-radius:10px;">
+                    <a href="{{ .ConfirmationURL }}" target="_blank" style="display:inline-block; padding:15px 32px; font-family: Arial, Helvetica, sans-serif; font-size:15px; font-weight:bold; color:#E3D4C0; text-decoration:none; border-radius:10px;">
+                      Confirmar nuevo correo
+                    </a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td class="sc-px" style="padding: 0 32px 24px;">
+              <p style="margin:0; font-family: Arial, Helvetica, sans-serif; font-size: 12.5px; line-height:1.5; color:#100F0F; opacity:0.6;">
+                Si el botón no funciona, copia y pega este enlace en tu navegador:<br>
+                <a href="{{ .ConfirmationURL }}" style="color:#1F3355; word-break:break-all;">{{ .ConfirmationURL }}</a>
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td class="sc-px" style="padding: 0 32px 36px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#E3D4C0; border-radius:12px;">
+                <tr>
+                  <td style="padding: 16px 18px;">
+                    <p style="margin:0; font-family: Arial, Helvetica, sans-serif; font-size: 13px; line-height:1.5; color:#33211D;">
+                      Si tú no solicitaste este cambio, ignora este correo — tu cuenta seguirá con el correo anterior.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+
+          <!-- FOOTER -->
+          <tr>
+            <td align="center" class="sc-px" style="background-color:#F5EEE2; padding: 28px 32px;">
+              <p style="margin:0 0 6px; font-family: Georgia, 'Times New Roman', serif; font-style: italic; font-size: 14px; color:#33211D;">
+                Salmos Café
+              </p>
+              <p style="margin:0 0 14px; font-family: Georgia, 'Times New Roman', serif; font-style: italic; font-size: 13px; color:#33211D; opacity:0.8;">
+                Donde el café es un verso al paladar.
+              </p>
+              <p style="margin:0; font-family: Arial, Helvetica, sans-serif; font-size: 11px; color:#33211D; opacity:0.55; line-height:1.5;">
+                Este correo se envió porque hubo una acción en tu cuenta de Salmos Café.<br>
+                Si tienes dudas, puedes ignorarlo y tu cuenta seguirá igual.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

@@ -16,11 +16,11 @@ Aplicación parcial de **AUTH-1** (Google OAuth) y **AUTH-2** (SMTP + plantillas
 
 | Item | Estado | Evidencia |
 |---|---|---|
-| Plantilla "Confirmación" (diseño #1) | **HECHO** | `supabase/templates/confirmation.html` + `[auth.email.template.confirmation]` |
-| Plantilla "Recuperación" (diseño #2) | **HECHO** (uso condicional) | `recovery.html`. Con el flujo actual (`signInWithOtp`) la recuperación dispara **magic_link**, no esta plantilla; se deja lista para `resetPasswordForEmail` (decisión previa documentada en §5/§6) |
-| Plantilla "Código OTP" (diseño #3) | **HECHO** | `magic_link.html` — contiene solo `{{ .Token }}` (sin `ConfirmationURL`), por lo que GoTrue lo entrega como **OTP de 6 dígitos**; es el correo real de la recuperación de la app |
-| Plantilla "Cambio de correo" (diseño #4) | **HECHO** | `email_change.html` + `[auth.email.template.email_change]` (dispara en AUTH-6) |
-| Plantilla "Bienvenida" (diseño #5) | **HECHO** (archivo) / **PENDIENTE MANUAL** (disparador) | `welcome.html`; Supabase Auth no envía welcome nativo → requiere hook/Edge Function o automatización del proveedor de email |
+| Plantilla "Confirmación" (diseño #1) | **HECHO** | `email-templates/confirm-signup.html` + `[auth.email.template.confirmation]` |
+| Plantilla "Recuperación" (diseño #2) | **HECHO** (uso condicional) | `email-templates/reset-password.html`. Con el flujo actual (`signInWithOtp`) la recuperación dispara **magic_link**, no esta plantilla; se deja lista para `resetPasswordForEmail` (decisión previa documentada en §5/§6) |
+| Plantilla "Código OTP" (diseño #3) | **HECHO** | `email-templates/otp.html` — contiene solo `{{ .Token }}` (sin `ConfirmationURL`), por lo que GoTrue lo entrega como **OTP de 6 dígitos**; es el correo real de la recuperación de la app |
+| Plantilla "Cambio de correo" (diseño #4) | **HECHO** | `email-templates/change-email.html` + `[auth.email.template.email_change]` (dispara en AUTH-6) |
+| Plantilla "Bienvenida" (diseño #5) | **HECHO** (archivo) / **PENDIENTE MANUAL** (disparador) | `email-templates/welcome.html`; Supabase Auth no envía welcome nativo → requiere hook/Edge Function o automatización del proveedor de email |
 | Asuntos / preheaders | **HECHO** | Asuntos en `config.toml`; preheaders ocultos en cada HTML; copy y visual según `docs/SALMOS_EMAIL_DESIGN.md` |
 | Redirects locales | **HECHO** | `additional_redirect_urls = ["http://127.0.0.1:3000"]` (se corrigió `https`→`http`; URLs de producción pendientes) |
 | `[auth.external.google]` (AUTH-1) | **PENDIENTE MANUAL** | Bloque comentado en `config.toml` con `env(GOOGLE_CLIENT_ID/SECRET)`; exige credenciales de Google Cloud Console + activarlo en dashboard remoto. Descomentar sin `.env` rompería `supabase start`, por eso queda comentado |
@@ -29,7 +29,7 @@ Aplicación parcial de **AUTH-1** (Google OAuth) y **AUTH-2** (SMTP + plantillas
 
 **Verificación final:** `npm test` → **61/61** · `npm run build` → OK (warning de chunk >500 kB preexistente, no nuevo).
 
-**No se tocó `src/`**: el código de Google OAuth ya era correcto (`signInWithOAuth`) y AUTH-1/AUTH-2 son config/infra. Archivos modificados: `supabase/config.toml`, `.env.example`, `docs/AUTH_AUDIT.md` (este) y 5 nuevos en `supabase/templates/`.
+**No se tocó `src/`**: el código de Google OAuth ya era correcto (`signInWithOAuth`) y AUTH-1/AUTH-2 son config/infra. Archivos modificados: `supabase/config.toml`, `.env.example`, `docs/AUTH_AUDIT.md` (este) y 5 nuevos en `email-templates/` (única fuente de plantillas; la carpeta legacy `supabase/templates/` se eliminó al unificar rutas en `config.toml` → `./email-templates/*`, ver Actualización 2026-09-12).
 
 **Cadena para producción (al tener dominio y credenciales):** (1) descomentar `[auth.external.google]` y `[auth.email.smtp]` en `config.toml` y rellenar `.env` (gitignored); (2) replicar en el dashboard remoto (`Authentication → Providers / SMTP / Email Templates`); (3) definir en producción `site_url` + `additional_redirect_urls` y los redirects de Google Cloud Console; (4) confirmar `enable_confirmations` ON/OFF (decisión §17). Los templates aplican igual en local y remoto.
 
@@ -66,6 +66,25 @@ sincronización de clientes con Loyverse y de su validación en producción
   `1e0795e1-…ff6ec2`); B: `200` `linked` a `c85906ca-…`; **1** nuevo
   `loyverse_linked`, **0** `loyverse_created`.
 - **Tests:** `npm test` → **130/130** (10 en `tests/sync-claim.test.mjs`).
+
+### Actualización (2026-09-12) — fuente única de plantillas de email (`email-templates/`)
+
+Unificación de las plantillas de email en una única carpeta canónica:
+
+- **`email-templates/`** (raíz del repo) es ahora la única fuente de verdad para las 5 plantillas:
+  `confirm-signup.html`, `reset-password.html`, `otp.html`, `change-email.html`, `welcome.html` +
+  `assets/wordmark-cream.png` (PNG fuente del logo).
+- `supabase/config.toml` apunta los 4 type keys nativos a esa carpeta
+  (`content_path = "./email-templates/*.html"`, resuelto relativo a la raíz del repo — comportamiento
+  verificado del CLI). Se elimina la duplicación; **`supabase/templates/` ya no existe**.
+- Logo de las plantillas: URL provisional `https://salmos-cafe.com/email-assets/wordmark-cream.png`
+  marcada como PROVISIONAL en el HTML (sin dominio publicado todavía; al publicar se hospeda el PNG
+  en esa ruta y se retira el comentario).
+- Footer de marca: eslogan **"Donde el café es un verso al paladar."** en las 5 plantillas (reemplaza
+  "Tu café, tus visitas, tus recompensas."); `docs/SALMOS_EMAIL_DESIGN.md` actualizado.
+- `welcome.html` **no tiene trigger nativo** de Supabase Auth — envío sigue PENDIENTE MANUAL.
+- **Verificación:** `npm test` → **130/130** · `npm run build` → OK · `supabase start` con las 4
+  plantillas resueltas correctamente.
 
 > El cuerpo de esta auditoría (fecha 2026-09-11, commit `86b364f`) refleja el
 > estado de su fecha; esta sección es la actualización que la supera en lo que
@@ -108,7 +127,7 @@ El sistema de autenticación de **cliente** está **sustancialmente implementado
 | Vinculación Loyverse | **IMPLEMENTADO** | Edge Function `loyverse-customers` + `loyverseCore.js` | Crear/vincular/actualizar conservador; conflicto → 409; evento `loyverse_updated` requiere 0004 (remoto ⏳). |
 | Sesión persistente | **IMPLEMENTADO** | `lib/supabase/client.js` (`persistSession`, `autoRefreshToken`, `detectSessionInUrl`) | `getSession` reconstruye perfil en cada carga. |
 | Cerrar sesión | **IMPLEMENTADO** | `signOutClient` → `auth.signOut()` | — |
-| SMTP propio | **PENDIENTE MANUAL** (plantillas ✅) | `supabase/templates/*.html` + `config.toml` | Plantillas propias (diseño aprobado) ya configuradas en `[auth.email.template.*]`; falta proveedor, dominio, SPF/DKIM/DMARC y remitente (datos externos, §0). |
+| SMTP propio | **PENDIENTE MANUAL** (plantillas ✅) | `email-templates/*.html` + `config.toml` | Plantillas propias (diseño aprobado) ya configuradas en `[auth.email.template.*]`; falta proveedor, dominio, SPF/DKIM/DMARC y remitente (datos externos, §0). |
 | Cambio de contraseña (Settings) | **NO IMPLEMENTADO** | `Settings.jsx` es solo-lectura | Solo existe la recuperación (fuera de sesión). |
 | Cambio de email/teléfono (Settings) | **NO IMPLEMENTADO** | — | — |
 | Gestión de sesiones (lista/revocar) | **NO IMPLEMENTADO** | — | Supabase las gestiona; sin UI ni endpoints propios. |
@@ -243,7 +262,7 @@ Hallazgo: hoy el motor de lealtad en ejecución sigue siendo el mock (datos en m
 - `config.toml`: `[auth.email.smtp]` está **comentado** (bloque listo con `env(SMTP_*)`) → en local se usa `[local_smtp]` (servidor de inspección, no envía); en remoto, el **built-in** de Supabase (`no-reply@supabase.co`).
 - Implicación: la entrega de "correo de confirmación" y "código de recuperación" depende de la infraestructura de Supabase y no lleva marca propia; deliverability (SPF/DKIM) no está bajo control del proyecto.
 - El código **no depende** del proveedor: no hay ninguna lógica de envío en `src/`; todo pasa por los métodos de `supabase-js` (`signUp`/`signInWithOtp`/`resend`).
-- **Avance AUTH-2 (ver §0):** las 5 plantillas de email (`confirmation`, `recovery`, `magic_link` OTP, `email_change`, `welcome`) ya existen en `supabase/templates/` con el diseño aprobado de `docs/SALMOS_EMAIL_DESIGN.md`, y las 4 nativas están cableadas en `[auth.email.template.*]`. Lo único pendiente es el dato externo: proveedor SMTP, dominio, SPF/DKIM/DMARC y el remitente (`no-reply@salmos…` vs `hola@…`).
+- **Avance AUTH-2 (ver §0):** las 5 plantillas de email (`confirm-signup`, `reset-password`, `otp` OTP, `change-email`, `welcome`) ya existen en `email-templates/` con el diseño aprobado de `docs/SALMOS_EMAIL_DESIGN.md`, y las 4 nativas están cableadas en `[auth.email.template.*]` (content_path relativo a la raíz del repo). Lo único pendiente es el dato externo: proveedor SMTP, dominio, SPF/DKIM/DMARC y el remitente (`no-reply@salmos…` vs `hola@…`).
 
 ---
 

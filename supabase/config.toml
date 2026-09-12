@@ -247,37 +247,42 @@ otp_expiry = 3600
 # sender_name = "env(SMTP_SENDER_NAME)"
 
 # Plantillas de email propias (diseño aprobado, ver docs/SALMOS_EMAIL_DESIGN.md).
+# FUENTE ÚNICA: carpeta `email-templates/` en la raíz del repo. Los type keys de
+# Supabase (confirmation, recovery, magic_link, email_change) se mapean a los
+# nombres descriptivos de la carpeta. NO mantener copias en `supabase/templates/`.
 # Asuntos y preheaders según diseño; el email de "código OTP" usa la plantilla
 # magic_link con {{ .Token }} (sin ConfirmationURL) para que GoTrue lo envíe como
 # OTP de 6 dígitos, que es el flujo real de recuperación de la app.
+# Los content_path son relativos a la raíz del repo (comportamiento del CLI para
+# [auth.email.template.*]).
 
 # Confirma tu correo (design #1) — se envía al registrarse si confirmations está ON.
 [auth.email.template.confirmation]
 subject = "Confirma tu correo en Salmos Café"
-content_path = "./supabase/templates/confirmation.html"
+content_path = "./email-templates/confirm-signup.html"
 
 # Restablece tu contraseña (design #2) — se envía con resetPasswordForEmail.
 # OJO: la app usa signInWithOtp para la recuperación, que dispara magic_link
 # (design #3), no esta plantilla. Se deja lista para el flujo de link si cambia.
 [auth.email.template.recovery]
 subject = "Restablece tu contraseña de Salmos Café"
-content_path = "./supabase/templates/recovery.html"
+content_path = "./email-templates/reset-password.html"
 
 # Código OTP (design #3) — SOLO {{ .Token }}, sin ConfirmationURL: así GoTrue
 # entrega el código de 6 dígitos en vez de un link. Es el correo real de la
 # recuperación de contraseña de la app (signInWithOtp).
 [auth.email.template.magic_link]
 subject = "Tu código de acceso a Salmos Café"
-content_path = "./supabase/templates/magic_link.html"
+content_path = "./email-templates/otp.html"
 
 # Confirma tu nuevo correo (design #4) — se envía al cambiar email (AUTH-6).
 [auth.email.template.email_change]
 subject = "Confirma tu nuevo correo en Salmos Café"
-content_path = "./supabase/templates/email_change.html"
+content_path = "./email-templates/change-email.html"
 
-# Bienvenida (design #5) — no tiene disparador nativo en Supabase Auth; la plantilla
-# vive en ./supabase/templates/welcome.html y su envío queda PENDIENTE MANUAL
-# (ver AUTH_AUDIT.md §AUTH-2).
+# Bienvenida (design #5) — NO tiene disparador nativo en Supabase Auth.
+# La plantilla fuente vive en ./email-templates/welcome.html y su envío queda
+# PENDIENTE MANUAL / implementación posterior (ver AUTH_AUDIT.md §AUTH-2).
 
 [auth.sms]
 # Allow/disallow new user signups via SMS to your project.
