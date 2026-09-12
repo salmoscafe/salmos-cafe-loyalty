@@ -102,6 +102,26 @@ export function isDuplicateCustomerCodeError(error) {
   );
 }
 
+// Detecta "ya existe" con el formato real de la API de Loyverse. En la
+// práctica el 400 de un customer_code duplicado puede llegar con textos
+// distintos ("Customer already exists", "duplicate", "customer code"…),
+// y un 409 es casi siempre "recurso ya creado". Cualquiera de esos casos
+// debe rebuscar y vincular en vez de fallar (ver orquestación abajo).
+export function looksLikeDuplicateCreateError(error) {
+  if (!error) return false;
+  if (error.status === 409) return true;
+  if (error.status === 400 || error.status === 422) {
+    const haystack = `${String(error?.message || "")} ${String(error?.body || "")}`.toLowerCase();
+    return (
+      haystack.includes("customer_code") ||
+      haystack.includes("customer code") ||
+      haystack.includes("already exist") ||
+      haystack.includes("duplicate")
+    );
+  }
+  return false;
+}
+
 // --------------------- Actualización de identidad -----------------------
 //
 // Reglas conservadoras (decididas con el socio, ver docs/CURRENT_STATUS.md):
@@ -264,9 +284,18 @@ export async function createOrLinkLoyverseCustomer({
       phone_number: toE164(phone),
       customer_code: String(customerCode || "").slice(0, 40) || undefined,
     });
+    // La API debe devolver el id del cliente creado. Si "creó" sin id
+    // (respuesta inesperada), tratar como fallo retriable para NUNCA
+    // grabar `synced` con loyverse_customer_id nulo (luego el reintento
+    // rebusca por email y vincula).
+    if (!created || !created.id) {
+      const error = new Error("Loyverse create response missing customer id");
+      error.status = 502;
+      throw error;
+    }
     return { status: "created", loyverseCustomerId: created.id, audit: { created: true, id: created.id } };
   } catch (error) {
-    if (isDuplicateCustomerCodeError(error)) {
+    if (isDuplicateCustomerCodeError(error) || looksLikeDuplicateCreateError(error)) {
       // Alguien más acaba de crearlo (o ya existía con ese código):
       // rebuscar y vincular en lugar de fallar.
       const emailAgain = normalizedEmail ? await transport.listByEmail(normalizedEmail) : [];

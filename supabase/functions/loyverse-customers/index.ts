@@ -199,13 +199,20 @@ Deno.serve(async (req) => {
         );
       }
 
-      await supabase
+      // El vínculo local es el objetivo: si no se graba, el perfil queda
+      // sin `loyverse_customer_id` y un reintento re-entraría por
+      // búsqueda (seguro) en el peor caso tras un fallo. En vez de
+      // responder éxito con el id "perdido", se propaga como 502
+      // retriable: el cliente mantiene `failed` y el reintento rebusca y
+      // reusa el cliente remoto ya creado.
+      const { error: linkError } = await supabase
         .from("customers")
         .update({
           loyverse_customer_id: result.loyverseCustomerId,
           loyverse_sync_status: "synced",
         })
         .eq("auth_user_id", user.id);
+      if (linkError) throw linkError;
 
       await logSyncEvent(supabase, {
         authUserId: user.id,

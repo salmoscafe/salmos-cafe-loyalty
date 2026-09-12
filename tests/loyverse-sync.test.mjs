@@ -57,9 +57,12 @@ function makeStore(initialCustomers = [], opts = {}) {
     async create(payload) {
       calls.push({ op: "create", payload });
       if (customers.some((c) => c.customer_code && c.customer_code === payload.customer_code)) {
-        const error = new Error("Loyverse request failed with 400");
-        error.status = 400;
-        error.body = "customer_code already taken";
+        // `opts.duplicateError` permite simular el error "ya existe" con
+        // cualquier formato real de la API (no solo "customer_code").
+        const { status = 400, body = "customer_code already taken" } = opts.duplicateError || {};
+        const error = new Error(`Loyverse request failed with ${status}`);
+        error.status = status;
+        error.body = body;
         throw error;
       }
       const created = { id: `lv_${customers.length + 1}`, ...payload };
@@ -409,6 +412,101 @@ test("audit.updated es true solo cuando hubo actualizacion real", async () => {
   assert.equal(filled.status, "updated");
   assert.equal(filled.audit.updated, true);
   assert.deepEqual([...filled.audit.fields].sort(), ["customer_code", "name", "phone_number"]);
+});
+
+// ------------------------------------------------------------------
+// Regresión de duplicados (bug real reportado en producción).
+//   1) Vínculo local fallido tras crear remoto: el reintento REUSA el
+//      mismo cliente (nunca crea otro) aunque no se conserve el id local.
+//   2) Crear con 400/409 por duplicado (cualquier mensaje de la API) →
+//      rebusca y vincula en vez de re-lanzar el error.
+//   3) Respuesta "creada" SIN id → error retriable; jamás "synced" con
+//      loyverse_customer_id nulo.
+// ------------------------------------------------------------------
+
+test("repro: crear remoto + vinculo local fallido -> reintento reusa el id (sin duplicado)", async () => {
+  const { store, transport } = makeStore();
+  const profile = baseProfile({
+    name: "Ember Test",
+    email: "embertracker.app@gmail.com",
+    phone: "6641234567",
+    customerCode: "SC-QXHKY4DC",
+  });
+
+  // 1) Primer sync: NO existe en Loyverse → se crea (remoto creado).
+  const first = await createOrLinkLoyverseCustomer({ transport, ...profile });
+  assert.equal(first.status, "created");
+  assert.ok(first.loyverseCustomerId);
+
+  // 2) El vínculo local ("loyverse_customer_id + synced") NO se grabó:
+  //    el reintento re-entra por búsqueda (sin knownLoyverseCustomerId).
+  const retry = await createOrLinkLoyverseCustomer({
+    transport,
+    name: profile.name,
+    email: profile.email,
+    phone: profile.phone,
+    customerCode: profile.customerCode,
+  });
+
+  // 3) Reintento: encuentra al ya creado por email y lo REUSA.
+  assert.ok(["linked", "updated"].includes(retry.status), `reintento debe reusar (obtuvo ${retry.status})`);
+  assert.equal(retry.loyverseCustomerId, first.loyverseCustomerId);
+  // "synced" a nivel cliente deriva de linked/updated/created/already.
+  assert.equal(
+    store.filter((c) => normalizeEmail(c.email) === "embertracker.app@gmail.com").length,
+    1,
+    "no se crea un segundo cliente Loyverse"
+  );
+});
+
+test("create 400 por duplicado con mensaje generico -> rebusca y vincula", async () => {
+  const { store, transport } = makeStore(
+    [
+      {
+        id: "lv_1",
+        name: "Ember Test",
+        email: "embertracker.app@gmail.com",
+        phone_number: "+526641234567",
+        customer_code: "SC-QXHKY4DC",
+      },
+    ],
+    // La API real puede responder 400 con otro texto (sin "customer_code"):
+    // el guard debe igualmente rebuscar y vincular en vez de re-lanzar.
+    { hiddenInFirstPass: true, duplicateError: { status: 400, body: "Customer already exists" } }
+  );
+
+  const result = await createOrLinkLoyverseCustomer({
+    transport,
+    name: "Ember Test",
+    email: "embertracker.app@gmail.com",
+    phone: "6641234567",
+    customerCode: "SC-QXHKY4DC",
+  });
+
+  assert.equal(result.status, "linked");
+  assert.equal(result.loyverseCustomerId, "lv_1");
+  assert.equal(result.audit.afterDuplicateCode, true);
+  assert.equal(store.length, 1, "no se crea un duplicado");
+});
+
+test("respuesta inesperada de Loyverse (create sin id) -> error, nunca synced sin id", async () => {
+  const transport = {
+    async listByEmail() {
+      return [];
+    },
+    async listByPhone() {
+      return [];
+    },
+    async create() {
+      // La API "creó" pero no devolvió id: tratar como fallo retriable.
+      return {};
+    },
+  };
+
+  await assert.rejects(
+    createOrLinkLoyverseCustomer({ transport, ...baseProfile() }),
+    /missing customer id/i
+  );
 });
 
 // Helpers de normalización.

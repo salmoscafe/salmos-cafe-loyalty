@@ -113,8 +113,10 @@ la API de Loyverse SOLO en la Edge Function (dueña de
    dígitos). Si el perfil ya tiene `loyverse_customer_id` + `synced`, sale
    `already_linked` **sin red**.
 2. **Crear**: si no existe, `POST /v1.0/customers` con `name`, `email`,
-   `phone_number` (E.164 +52), `customer_code`. Duplicado por `customer_code`
-   (400) → rebusca y vincula.
+   `phone_number` (E.164 +52), `customer_code`. Un error de duplicado
+   (400/409/422, con cualquier formato del mensaje de la API) → rebusca y
+   vincula. Si la API "crea" sin devolver `id`, se trata como fallo
+   retriable (nunca `synced` con id nulo).
 3. **Vincular**: si existe (email y/o teléfono), se vincula al cliente
    existente sin crear (nunca duplicados). Si email→X y teléfono→Y (distintos)
    o el teléfono es ambiguo → conflicto (409, no retriable).
@@ -139,6 +141,15 @@ la API de Loyverse SOLO en la Edge Function (dueña de
    `loyverse_conflict`, `loyverse_error`) — `loyverse_updated` se registra
    SOLO cuando hubo una actualización real. El tipo lo permite la migración
    `0004` (la CHECK de `event_type` de 0001 no lo incluía).
+6. **Concurrencia (anti-duplicados)**: la búsqueda+creación no es atómica
+   contra la API, por eso el app colapsa toda sincronización concurrente
+   (sync automático del arranque + Retry, o llamadas solapadas) a UNA sola
+   llamada remota vía **single-flight** (`src/services/loyverse/singleFlight.js`
+   → `loyverseCustomerService`). Y si el vínculo local no se graba
+   (`loyverse_customer_id` + `synced`), la Edge responde **502 retriable**
+   (en vez de éxito con el id "perdido") y el reintento rebusca y reusa el
+   mismo cliente remoto — reprobado como regresión en
+   `tests/loyverse-sync.test.mjs` y `tests/single-flight.test.mjs`.
 
 Cambios de comportamiento esperado (documentados y cubiertos en tests):
 un cliente existente cuyo **teléfono difiere** del de Salmos ya no se vincula

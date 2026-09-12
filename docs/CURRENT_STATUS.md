@@ -265,8 +265,16 @@ resolver para email) porque el anon no puede leer `customers` (RLS).
     `total_points`, historial de ventas/receipts — jamás se leen ni viajan.
 - **F) Cómo evita duplicados**: búsqueda por email → búsqueda por teléfono →
   una sola operación de creación solo si `none`; `customer_code` UNIQUE en
-  `customers` (lado Salmos) y manejo del error 400 de `customer_code`
-  duplicado en Loyverse (rebusca y vincula).
+  `customers` (lado Salmos) y manejo del error 400/409/422 de duplicado en
+  Loyverse con cualquier formato de la API (rebusca y vincula). Además
+  (Fase D2): **single-flight del lado cliente** — la búsqueda+creación no es
+  atómica contra la API, así que el app colapsa toda sincronización
+  concurrente (sync automático del arranque + Retry, o llamadas solapadas)
+  a UNA sola llamada remota (`coalesce` en
+  `src/services/loyverse/singleFlight.js`, usado por
+  `loyverseCustomerService`). Y la Edge Function propaga como 502 retriable
+  cualquier fallo al grabar el vínculo local (`loyverse_customer_id`), en
+  vez de responder éxito con el id "perdido".
 - **G) Cómo maneja conflictos** (`resolveLoyverseTarget`):
   - email→X y teléfono→Y (distintos) → **conflicto** `email_phone_conflict`
     (no crea un tercero).
@@ -283,10 +291,16 @@ resolver para email) porque el anon no puede leer `customers` (RLS).
      llama).
   2. `external_sale_id` UNIQUE a nivel lealtad (mock) y
      `loyalty_visits.external_sale_id UNIQUE` (Supabase).
-  3. Doble submit al crear → error 400 `customer_code` duplicado →
-     rebusca y vincula (`afterDuplicateCode: true`) **sin updates**.
-  4. Carrera en `customer_code`/`auth_user_id` de Salmos → detecta 23505 y
-     relee la fila existente.
+3. Doble submit al crear → error de duplicado (400/409/422, incluye el
+      `customer_code` con cualquier formato del mensaje) → rebusca y vincula
+      (`afterDuplicateCode: true`) **sin updates**.
+   4. Carrera en `customer_code`/`auth_user_id` de Salmos → detecta 23505 y
+      relee la fila existente.
+   5. Respuesta de Loyverse "creada" **sin id** → se trata como fallo
+      retriable, jamás se graba `synced` con `loyverse_customer_id` nulo.
+   6. Vínculo local fallido tras crear el remoto: el reintento rebusca por
+      email y **reusa** el mismo cliente (nunca crea otro) — probado como
+      regresión en `tests/loyverse-sync.test.mjs`.
 - **I) Si Loyverse falla**: la Edge Function loguea `loyverse_error`, marca
   `loyverse_sync_status = failed` y responde 502 `loyverse_unavailable`
   (retriable). La app entrega la sesión igual y `SyncBanner` ofrece
@@ -351,7 +365,7 @@ remoto); los cambios van en `0004+` (esta Fase C usa `0004`).
 - `tests/loyalty.test.mjs` (13): monto mínimo, 1 visita/día, 8ª visita,
   expiración 3 meses, cancelación/reversión/bloqueo, idempotencia por
   `externalSaleId`, sucursales compartidas, barrel sin `addVisit`.
-- `tests/loyverse-sync.test.mjs` (23): crear con `customer_code`+E.164,
+- `tests/loyverse-sync.test.mjs` (26): crear con `customer_code`+E.164,
   vincular por email, vincular por teléfono (paginado), email+teléfono
   mismo cliente, conflictos (email_phone / teléfono ambiguo / sin ids /
   identity_conflict por email o teléfono distinto), doble submit
@@ -363,15 +377,22 @@ remoto); los cambios van en `0004+` (esta Fase C usa `0004`).
   espacios/mayúsculas) sin update, email/teléfono distintos → conflicto
   conservador, nombre/`customer_code` distintos → omitidos y auditados,
   campos del POS nunca viajan, error de update se propaga (502 retriable),
-  `audit.updated` solo con update real, y matriz pura de
-  `computeIdentityUpdates`.
+  `audit.updated` solo con update real, matriz pura de
+  `computeIdentityUpdates`, y la regresión de duplicados: repro
+  "crear remoto + vínculo local fallido → reintento reusa el id", 400 de
+  duplicado con mensaje genérico → rebusca y vincula, y create sin id →
+  error retriable.
+- `tests/single-flight.test.mjs` (5): `coalesce` comparte UNA ejecución
+  para llamadas concurrentes, nueva ejecución tras terminar, liberación
+  del slot tras rechazo, dedup a nivel servicio (mismo resultado), perfil
+  ya vinculado → `already_synced` sin red.
 - `tests/auth.test.mjs` (25): registro, login email/teléfono (E.164 y 10
   dígitos), duplicados, bounds de contraseña/email, recuperación OTP
   completa, `checkSecondaryContact` (teléfono/email en uso, 10 dígitos),
   Google, error temporal.
 
-Total corriente: **112/112 pass** (25 auth + 13 loyalty + 23 loyverse-sync
-+ 45 loyalty-engine + 6 navigation).
+Total corriente: **120/120 pass** (25 auth + 13 loyalty + 26 loyverse-sync
++ 5 single-flight + 45 loyalty-engine + 6 navigation).
 
 ## Real End-to-End Tests
 
