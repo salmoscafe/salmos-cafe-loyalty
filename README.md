@@ -181,6 +181,17 @@ Reglas implementadas en el motor SQL (migraciones `0002`/`0005`/`0007`):
 5. Abre la app con `.env` real, entra como el cliente de prueba y en `/`
    confirma el contador (`2/8`) y, si corresponde, `currentReward`.
 
+#### 9) Refinamiento visual — Home / branding
+
+* Commit: `b8c7f66`
+* Se refinó la presentación visual del Home del cliente.
+* Se agregó el slogan oficial: **“Donde el café es un verso al paladar”**, centrado después de la tarjeta digital.
+* Se eliminó el pequeño IconMark/S de la tarjeta, dejando el Wordmark de Salmos Café.
+* Los cambios visuales corresponden a:
+
+  * `src/screens/client/Home.jsx`
+  * `src/styles.css`
+
 ## Project Status
 
 - **En desarrollo activo.**
