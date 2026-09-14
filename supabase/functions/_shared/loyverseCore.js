@@ -2,6 +2,9 @@
 // loyverseCore — Lógica pura de sincronización Salmos⇄Loyverse.
 // Vive del lado servidor (Edge Function) y es el único lugar donde se
 // decide: buscar por email → buscar por teléfono → vincular o crear.
+// H1: SOLO el email autentica el vínculo; un match únicamente por
+// teléfono NO vincula (phone_requires_verification), el teléfono queda
+// como auxiliar de relleno sobre el target ya resuelto por email.
 //
 // Es 100% agnóstico del transporte: recibe un `transport` con
 //   { listByEmail(email), listByPhone(phone), create(payload),
@@ -59,8 +62,12 @@ function pickUnique(list) {
 }
 
 // Resuelve a qué cliente de Loyverse apunta esta persona.
-//   linked    → id del cliente a vincular (email, teléfono o ambos).
-//   conflict  → NO se decide: email→X y teléfono→Y, o teléfono ambiguo.
+//   linked    → id del cliente a vincular: por email, o email+teléfono que
+//               apuntan al MISMO cliente (email_and_phone).
+//   conflict  → NO se decide: email→X y teléfono→Y (email_phone_conflict),
+//               teléfono ambiguo (ambiguous_phone), o SOLO teléfono
+//               (phone_requires_verification: un número no autentica la
+//               identidad → vetado vincular únicamente por teléfono).
 //   none      → no hay cliente: hay que crear.
 export function resolveLoyverseTarget({ emailMatches, phoneMatches }) {
   const emails = emailMatches || [];
@@ -85,10 +92,15 @@ export function resolveLoyverseTarget({ emailMatches, phoneMatches }) {
     return { status: "linked", loyverseCustomerId: emailTarget.id, audit: { via: "email", id: emailTarget.id } };
   }
   if (phones.length) {
-    if (!phoneTarget) {
-      return { status: "conflict", audit: { code: "ambiguous_phone", phoneCustomerIds: phones.map((c) => c.id) } };
-    }
-    return { status: "linked", loyverseCustomerId: phoneTarget.id, audit: { via: "phone", id: phoneTarget.id } };
+    // H1: sin respaldo de email, el teléfono NO autentica la identidad.
+    // Match único → se pide verificar el correo; match múltiple → ambiguo.
+    return {
+      status: "conflict",
+      audit: {
+        code: phoneTarget ? "phone_requires_verification" : "ambiguous_phone",
+        phoneCustomerIds: phones.map((c) => c.id),
+      },
+    };
   }
   return { status: "none", audit: { via: null } };
 }
@@ -201,8 +213,10 @@ function pickResolvedCustomer(emailMatches, phoneMatches) {
 //   1. Si ya tenemos loyverse_customer_id → idempotencia total (sin red).
 //   2. Buscar por email (filtro oficial de la API).
 //   3. Buscar por teléfono (la API no lo filtra; listar + filtrar).
-//   4. Vincular si se encuentra uno compatible; conflicto si email y
-//      teléfono apuntan a clientes distintos; crear solo si no existe.
+//   4. Vincular SOLO con respaldo de email (o email+teléfono al MISMO
+//      cliente). Conflicto si email y teléfono apuntan a clientes
+//      distintos, si el teléfono es ambiguo, o si NO hay email (vetado:
+//      phone_requires_verification). Crear solo si no existe nada.
 //   5. Si crear falla por customer_code duplicado (doble submit), se
 //      rebusca y vincula en vez de fallar.
 export async function createOrLinkLoyverseCustomer({

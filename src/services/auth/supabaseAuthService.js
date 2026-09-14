@@ -121,10 +121,8 @@ export async function ensureCustomerProfile(user, { name, email, phone }) {
     auth_user_id: user.id,
     name: displayName || "Cliente Salmos",
     email: email ? String(email).trim().toLowerCase() : user.email || null,
-    email_verified: Boolean(user.email_confirmed_at),
     phone: phone ? toE164Mx(phone) || String(phone).trim() : user.phone || null,
     customer_code: customerCode,
-    loyverse_sync_status: "pending",
   };
 
   const { data, error } = await supabaseClient.from("customers").insert(insertRow).select("*").single();
@@ -143,27 +141,14 @@ async function runLoyverseSync(profile) {
   if (profile.loyverse_customer_id && profile.loyverse_sync_status === "synced") {
     return { status: "already_synced", loyverseCustomerId: profile.loyverse_customer_id };
   }
-  let result;
+  // H1: el cliente NUNCA escribe loyverse_customer_id / loyverse_sync_status.
+  // La persistencia la hace la Edge Function con service_role; aquí solo se
+  // obtiene el resultado para la sesión/UI (buildSession y retryLoyverseSync).
   try {
-    result = await createOrLinkLoyverseCustomer(profile);
+    return await createOrLinkLoyverseCustomer(profile);
   } catch {
-    result = { status: "failed", error: "loyverse_unavailable" };
+    return { status: "failed", error: "loyverse_unavailable" };
   }
-  const dbStatus =
-    result.status === "created" ||
-    result.status === "updated" ||
-    result.status === "linked" ||
-    result.status === "already_synced"
-      ? "synced"
-      : "failed";
-  await supabaseClient
-    .from("customers")
-    .update({
-      loyverse_customer_id: result.loyverseCustomerId || profile.loyverse_customer_id || null,
-      loyverse_sync_status: dbStatus,
-    })
-    .eq("auth_user_id", profile.auth_user_id);
-  return result;
 }
 
 function toClientCustomer(profile) {

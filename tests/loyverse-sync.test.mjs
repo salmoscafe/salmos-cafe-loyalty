@@ -134,9 +134,10 @@ test("email coincide pero telefono distinto -> conflicto conservador", async () 
   assert.ok(!transport._calls.some((c) => c.op === "update"));
 });
 
-// 3. No existe por email pero sí por teléfono (la API no filtra por teléfono).
-test("telefono existente: se pagina/lista y vincula via phone", async () => {
-  const { store, transport } = makeStore([
+// 3. No existe por email pero sí por teléfono → H1: el teléfono NO
+//    autentica la identidad → conflict/phone_requires_verification.
+test("telefono existente pero SIN email -> conflict phone_requires_verification", async () => {
+  const { transport } = makeStore([
     { id: "lv_1", name: "Mara Salinas", email: "mara@example.com" },
     { id: "lv_2", name: "Otro", email: "otro@example.com" },
     { id: "lv_3", name: "Otro2", email: "otro2@example.com" },
@@ -148,11 +149,9 @@ test("telefono existente: se pagina/lista y vincula via phone", async () => {
     transport,
     ...baseProfile({ email: null, phone: "6641234567" }),
   });
-  assert.equal(result.status, "linked");
-  assert.equal(result.loyverseCustomerId, "lv_6");
-  assert.equal(result.audit.via, "phone");
-  // nombre distinto (no vacío) → se omite y se registra en auditoría.
-  assert.deepEqual(result.audit.skippedFields, ["name"]);
+  assert.equal(result.status, "conflict");
+  assert.equal(result.audit.code, "phone_requires_verification");
+  assert.deepEqual(result.audit.phoneCustomerIds, ["lv_6"]);
   assert.ok(transport._calls.some((c) => c.op === "listByPhone"));
   assert.ok(!transport._calls.some((c) => c.op === "create"));
   assert.ok(!transport._calls.some((c) => c.op === "update"));
@@ -326,17 +325,16 @@ test("diferencia segura (espacios/minusculas en email) no genera update", async 
   assert.ok(!transport._calls.some((c) => c.op === "update"));
 });
 
-// 5. Email distinto en el cliente existente → conflicto conservador: no se
-//    sobrescribe, no se actualiza nada, no se crea nada.
-test("email distinto en cliente existente -> conflicto conservador", async () => {
+// 5. El email del cliente Loyverse NO coincide y solo coincide por
+//    teléfono → H1: el número no autentica identidad → bloqueo
+//    phone_requires_verification (no se llega ni a identity_conflict).
+test("sin match de email y solo coincide el telefono -> phone_requires_verification", async () => {
   const { transport } = makeStore([
     { id: "lv_1", name: "Javier Castro", email: "otro@example.com", phone_number: "6641234567", customer_code: "SC-AAAAAAAA" },
   ]);
   const result = await createOrLinkLoyverseCustomer({ transport, ...baseProfile() });
-  // resuelto por teléfono; el email difiere → bloque.
   assert.equal(result.status, "conflict");
-  assert.equal(result.audit.code, "identity_conflict");
-  assert.deepEqual(result.audit.fields, ["email"]);
+  assert.equal(result.audit.code, "phone_requires_verification");
   assert.ok(!transport._calls.some((c) => c.op === "create"));
   assert.ok(!transport._calls.some((c) => c.op === "update"));
 });
@@ -526,8 +524,14 @@ test("resolveLoyverseTarget: casos puros (email/phone/conflict/none)", () => {
   const same = { id: "x", email: "a@x.com", phone_number: "+525555" };
 
   assert.equal(resolveLoyverseTarget({ emailMatches: [a] }).status, "linked");
-  assert.equal(resolveLoyverseTarget({ emailMatches: [], phoneMatches: [b] }).status, "linked");
+  // H1: teléfono SOLO (aunque único) → conflict, nunca linked.
+  assert.equal(resolveLoyverseTarget({ emailMatches: [], phoneMatches: [b] }).status, "conflict");
+  assert.equal(resolveLoyverseTarget({ emailMatches: [], phoneMatches: [b] }).audit.code, "phone_requires_verification");
   assert.equal(resolveLoyverseTarget({ emailMatches: [], phoneMatches: [b, { id: "z", phone_number: "+525555" }] }).status, "conflict");
+  assert.equal(
+    resolveLoyverseTarget({ emailMatches: [], phoneMatches: [b, { id: "z", phone_number: "+525555" }] }).audit.code,
+    "ambiguous_phone"
+  );
   assert.equal(resolveLoyverseTarget({ emailMatches: [a], phoneMatches: [same] }).status, "linked");
   assert.equal(resolveLoyverseTarget({ emailMatches: [a], phoneMatches: [b] }).status, "conflict");
   assert.equal(resolveLoyverseTarget({ emailMatches: [], phoneMatches: [] }).status, "none");

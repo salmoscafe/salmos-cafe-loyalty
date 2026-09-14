@@ -8,13 +8,21 @@
 //
 // Seguridad:
 //   * Requiere Authorization: Bearer <JWT del usuario>.
-//   * Lee/escribe la fila `customers` SOLO del usuario autenticado
-//     (RLS: auth.uid() = auth_user_id), usando el propio JWT.
+//   * Lee la fila `customers` del usuario autenticado con su propio JWT
+//     (RLS: auth.uid() = auth_user_id).
+//   * Las escrituras a las columnas internas loyverse_sync_claim,
+//     loyverse_sync_claim_at, loyverse_sync_status y loyverse_customer_id
+//     se hacen con UN SEGUNDO cliente service_role (nunca con el RLS del
+//     usuario), siempre scoped por el auth_user_id verificado del JWT. El
+//     frontend no tiene privilegios sobre esas columnas (migración 0008).
+//   * La identidad de contacto (email) SIEMPRE viene de GoTrue
+//     (user.email): la petición no puede mutar el correo (C4).
 //   * No expone el token de Loyverse ni detalles internos en las
 //     respuestas. Los fallos devuelven códigos amigables.
 //
 // Despliegue: supabase functions deploy loyverse-customers
-// Vars: SUPABASE_URL, SUPABASE_ANON_KEY, LOYVERSE_ACCESS_TOKEN
+// Vars: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
+//       LOYVERSE_ACCESS_TOKEN
 // ---------------------------------------------------------------
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -103,10 +111,12 @@ function createTransport(accessToken) {
 // atómico de la migración 0006: mientras otro claim esté vigente (no
 // vencido), el WHERE no matchea y count llega 0 (perdedor). `release` =
 // liberación con scope auth_user_id + token (nunca borra un claim ajeno).
-function createClaimDb(supabase) {
+// Se ejecuta con el cliente service_role (H1): el frontend no puede tocar
+// estas columnas; el auth_user_id ya vino verificado por el JWT del user.
+function createClaimDb(admin) {
   return {
     async claim({ authUserId, claim, claimAt, cutoffIso }) {
-      const { data, error } = await supabase
+      const { data, error } = await admin
         .from("customers")
         .update({ loyverse_sync_claim: claim, loyverse_sync_claim_at: claimAt })
         .eq("auth_user_id", authUserId)
@@ -117,7 +127,7 @@ function createClaimDb(supabase) {
       return { count: data ? 1 : 0 };
     },
     async release({ authUserId, claim }) {
-      const { error } = await supabase
+      const { error } = await admin
         .from("customers")
         .update({ loyverse_sync_claim: null, loyverse_sync_claim_at: null })
         .eq("auth_user_id", authUserId)
@@ -143,9 +153,10 @@ Deno.serve(async (req) => {
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
   const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
   const loyverseAccessToken = Deno.env.get("LOYVERSE_ACCESS_TOKEN") || "";
 
-  if (!loyverseAccessToken) {
+  if (!loyverseAccessToken || !serviceRoleKey) {
     return json({ ok: false, code: "srv_not_configured", retriable: true }, 503);
   }
 
@@ -156,6 +167,13 @@ Deno.serve(async (req) => {
 
     const supabase = createClient(supabaseUrl, supabaseAnonKey, {
       global: { headers: { Authorization: authHeader } },
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+
+    // Cliente service_role para las escrituras internas loyverse_* (H1).
+    // Bypass de RLS deliberado pero acotado: todas las mutaciones van
+    // scoped por `user.id` (el auth_user_id YA fue verificado arriba).
+    const admin = createClient(supabaseUrl, serviceRoleKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
@@ -187,8 +205,12 @@ Deno.serve(async (req) => {
       .eq("auth_user_id", user.id)
       .maybeSingle();
 
+    // C4: el email de identidad SIEMPRE viene de GoTrue (user.email).
+    // body.email se ignora: el cliente no puede mutar el correo. phone
+    // queda SOLO como auxiliar de relleno sobre el target resuelto por
+    // email (el match únicamente por teléfono está vetado en el core).
     const name = body.name || profile?.name || user.user_metadata?.name || "";
-    const email = body.email || profile?.email || null;
+    const email = user.email || profile?.email || null;
     const phone = body.phone || profile?.phone || user.phone || null;
     const customerCode = body.customerCode || profile?.customer_code || null;
 
@@ -198,7 +220,7 @@ Deno.serve(async (req) => {
 
     try {
       const outcome = await runLoyverseSync({
-        db: createClaimDb(supabase),
+        db: createClaimDb(admin),
         transport,
         authUserId: user.id,
         profile,
@@ -230,7 +252,7 @@ Deno.serve(async (req) => {
           eventType: "loyverse_conflict",
           detail: result.audit || {},
         });
-        await supabase
+        await admin
           .from("customers")
           .update({ loyverse_sync_status: "failed" })
           .eq("auth_user_id", user.id);
@@ -250,7 +272,7 @@ Deno.serve(async (req) => {
       // responder éxito con el id "perdido", se propaga como 502
       // retriable: el cliente mantiene `failed` y el reintento rebusca y
       // reusa el cliente remoto ya creado.
-      const { error: linkError } = await supabase
+      const { error: linkError } = await admin
         .from("customers")
         .update({
           loyverse_customer_id: result.loyverseCustomerId,
@@ -285,7 +307,7 @@ Deno.serve(async (req) => {
         eventType: "loyverse_error",
         detail: { message: safeDetail(error?.message || error), status: error?.status },
       });
-      await supabase
+      await admin
         .from("customers")
         .update({ loyverse_sync_status: "failed" })
         .eq("auth_user_id", user.id);
