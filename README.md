@@ -237,6 +237,22 @@ Reglas implementadas en el motor SQL (migraciones `0002`/`0005`/`0007`):
   * `src/screens/client/Home.jsx`
   * `src/styles.css`
 
+#### 10) QA — QR y `customer_code`
+
+* El QR de Salmos utiliza `QRCodeCanvas` (librería `qrcode.react`).
+* El payload del QR es exactamente el `customer_code`.
+* El valor llega por la cadena:
+  `App.jsx` → `QrModal.jsx` → `QrCode.jsx`.
+* En producción real, `cardNumber` proviene de `customer.customer_code`.
+* Ejemplo de payload: `SC-004821`.
+* Se realizó una verificación temporal en `QrCode.jsx` mostrando:
+  `QR payload` y `Customer code`.
+* Ambos valores fueron confirmados idénticos.
+* El diagnóstico es TEMPORAL y será retirado después del QA.
+* Tests: `155/155` pass.
+* Build: OK; únicamente permanece el warning preexistente de chunk >500 kB.
+* No se modificó la lógica de generación del QR.
+
 ## Project Status
 
 - **En desarrollo activo.**
