@@ -1,49 +1,36 @@
-import React, { useMemo } from "react";
+import React from "react";
+import { QRCodeCanvas } from "qrcode.react";
 
 // ---------------------------------------------------------------
-// Puramente de presentación: dibuja un patrón tipo-QR a partir de
-// un `token` que ya viene resuelto desde afuera (hoy: el número
-// de tarjeta del mock; mañana: un token firmado por el backend).
+// QR real y escaneable del número de tarjeta (customer_code).
+// El token llega resuelto desde afuera tal cual (hoy: el
+// customer_code del cliente; mañana: un token firmado por el
+// backend si se decide).
 //
-// A diferencia del prototipo original, este patrón es determinista
-// (hash simple del token) — no es aleatorio en cada render — para
-// que quede claro conceptualmente que representa un dato real, no
-// un valor decorativo que cambia solo.
+// Se renderiza en un <canvas> a 2x de su tamaño visual para que
+// se vea nítido en pantallas de alta densidad y sea legible por
+// la cámara de un celular.
 //
-// Sigue siendo un placeholder visual: no es un QR escaneable de
-// verdad. Eso requiere una librería de generación de QR (p. ej.
-// `qrcode`) el día que exista el token real — se deja el punto de
-// enchufe listo aquí mismo.
+// Se mantiene el marco `.sc-qr` (tile blanco con sombra propio de
+// Salmos). Se quitan las esquinas decorativas del placeholder, que
+// taparían módulos del QR real y dificultarían el escaneo.
 // ---------------------------------------------------------------
 
-function hashToken(token) {
-  let h = 0;
-  for (let i = 0; i < token.length; i++) {
-    h = (h * 31 + token.charCodeAt(i)) >>> 0;
-  }
-  return h || 1;
-}
-
-export function QrCode({ token, size = 11 }) {
-  const cells = useMemo(() => {
-    let seed = hashToken(token);
-    const next = () => {
-      seed = (seed * 9301 + 49297) % 233280;
-      return seed / 233280;
-    };
-    return Array.from({ length: size * size }, () => next() > 0.55);
-  }, [token, size]);
+export function QrCode({ token, size = 184 }) {
+  const value = String(token ?? "");
+  if (!value) return null;
 
   return (
     <div className="sc-qr">
-      <div className="sc-qr__grid" style={{ gridTemplateColumns: `repeat(${size}, 1fr)` }}>
-        {cells.map((on, i) => (
-          <span key={i} className={on ? "on" : ""} />
-        ))}
-      </div>
-      <div className="sc-qr__corner sc-qr__corner--tl" />
-      <div className="sc-qr__corner sc-qr__corner--tr" />
-      <div className="sc-qr__corner sc-qr__corner--bl" />
+      <QRCodeCanvas
+        value={value}
+        size={size * 2}
+        level="M"
+        marginSize={4}
+        bgColor="#ffffff"
+        fgColor="#000000"
+        style={{ width: size, height: size }}
+      />
     </div>
   );
 }
