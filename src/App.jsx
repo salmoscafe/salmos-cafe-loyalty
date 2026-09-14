@@ -80,7 +80,7 @@ function ClientApp() {
     if (!session) return;
     let cancelled = false;
     setLoyalty((s) => ({ ...s, loading: true, error: null }));
-    getCardForCustomer(session.customer.id)
+    getCardForCustomer(session.customer.profileId || session.customer.id)
       .then(async ({ card, cycle }) => {
         if (cancelled) return;
         const currentReward = card ? await rewardService.getCurrentReward(card.id) : null;

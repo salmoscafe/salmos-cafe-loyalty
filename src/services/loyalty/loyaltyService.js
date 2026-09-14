@@ -1,4 +1,5 @@
 import { delay } from "../../lib/delay.js";
+import { supabaseClient } from "../../lib/supabase/client.js";
 import {
   cards,
   loyaltyCycles,
@@ -13,6 +14,13 @@ import {
 // ---------------------------------------------------------------
 // loyaltyService — dueño del concepto de "ciclo de lealtad".
 //
+// LECTURAS del cliente (>getCardForCustomer, getCycleHistory):
+//   * Con Supabase configurado → datos REALES (RLS 0002: solo ve lo suyo vía
+//     customers.auth_user_id = auth.uid()). El progreso del ciclo se DERIVA
+//     de loyalty_visits activas (el esquema real no guarda contador).
+//     `getCardForCustomer` espera el customers.id real (session.customer.profileId).
+//   * Sin Supabase → fallback DEV/demo sobre mockDatabase (modo actual).
+//
 // IMPORTANTE: `addVisit` es de uso INTERNO. Solo debe ser llamado
 // por salesService.registerSale(), nunca directamente desde una
 // pantalla. No se expone a través de services/index.js por esta
@@ -22,8 +30,71 @@ import {
 // corresponde, generar la recompensa.
 // ---------------------------------------------------------------
 
+// ------------------------------------------------------------------
+// Lectura REAL (Supabase). La tarjeta física no existe como tabla en el
+// esquema: es la fila `customers` (cardNumber = customer_code). El ciclo
+// vigente y sus visitas vienen de loyalty_cycles + loyalty_visits.
+// ------------------------------------------------------------------
+
+// Todos los ciclos del cliente con su conteo de visitas ACTIVAS derivado.
+async function fetchCyclesWithVisits(customerId) {
+  const { data: cycles, error: cyclesError } = await supabaseClient
+    .from("loyalty_cycles")
+    .select("id, cycle_number, required_visits, status, started_at, completed_at")
+    .eq("customer_id", customerId)
+    .order("started_at", { ascending: false });
+  if (cyclesError) throw cyclesError;
+  if (!cycles || !cycles.length) return [];
+
+  const { data: visits, error: visitsError } = await supabaseClient
+    .from("loyalty_visits")
+    .select("cycle_id")
+    .in("cycle_id", cycles.map((c) => c.id))
+    .eq("status", "active");
+  if (visitsError) throw visitsError;
+
+  const activeByCycle = (visits || []).reduce((acc, visit) => {
+    acc[visit.cycle_id] = (acc[visit.cycle_id] || 0) + 1;
+    return acc;
+  }, {});
+
+  return cycles.map((cycle) => ({
+    id: cycle.id,
+    customerId,
+    cycleNumber: cycle.cycle_number,
+    requiredVisits: cycle.required_visits,
+    status: cycle.status,
+    startedAt: cycle.started_at,
+    completedAt: cycle.completed_at,
+    rewardId: null,
+    visits: activeByCycle[cycle.id] || 0,
+  }));
+}
+
+function toClientCard(customer) {
+  return {
+    id: customer.id,
+    customerId: customer.id,
+    cardNumber: customer.customer_code,
+    status: "active",
+  };
+}
+
 export async function getCardForCustomer(customerId) {
   await delay(250);
+
+  if (supabaseClient) {
+    const { data: customer, error } = await supabaseClient
+      .from("customers")
+      .select("id, customer_code")
+      .eq("id", customerId)
+      .maybeSingle();
+    if (error) throw error;
+    if (!customer) return { card: null, cycle: null };
+    const cycles = await fetchCyclesWithVisits(customer.id);
+    return { card: toClientCard(customer), cycle: currentCycleForCard(cycles) };
+  }
+
   const card = cards.find((c) => c.customerId === customerId) || null;
   if (!card) return { card: null, cycle: null };
   const cardCycles = loyaltyCycles.filter((cy) => cy.cardId === card.id);
@@ -43,6 +114,7 @@ export function currentCycleForCard(cardCycles) {
 
 export async function getCycleHistory(cardId) {
   await delay(250);
+  if (supabaseClient) return fetchCyclesWithVisits(cardId);
   return loyaltyCycles
     .filter((cy) => cy.cardId === cardId)
     .sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt));

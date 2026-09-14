@@ -435,6 +435,14 @@ deno_version = 2
 [functions.loyalty-engine]
 verify_jwt = true
 
+# Función loyverse-receipts-sync (Fase D2-v1 la cargo del POS).
+# Es server-side/scheduled: NO lleva JWT de usuario. La protege el header
+# `x-sync-secret` == SYNC_CRON_SECRET (variable de entorno) y el claim
+# atómico sobre loyverse_sync_state. verify_jwt = false para que un cron
+# externo (pg_cron + pg_net, GitHub Actions, etc.) pueda invocarla.
+[functions.loyverse-receipts-sync]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327

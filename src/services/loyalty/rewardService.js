@@ -1,12 +1,19 @@
 import { delay } from "../../lib/delay.js";
+import { supabaseClient } from "../../lib/supabase/client.js";
 import { loyaltyCycles, rewards, logAudit, generateId } from "../../data/mockDatabase.js";
 
 // ---------------------------------------------------------------
 // rewardService — consulta de recompensas, expiración y canje.
 //
-// El canje NO lo dispara el cliente por sí solo: la pantalla de
-// Cliente solo puede pedir "mostrar mi QR para canjear". Quien
-// confirma el canje (rewardService.redeemReward) es Staff, igual
+// LECTURAS (getRewardsForCard y derivadas):
+//   * Con Supabase configurado → datos REALES desde `rewards` (RLS 0002:
+//     el cliente solo lee lo suyo). `card.id` en modo real es el
+//     customers.id (~customer_id de rewards).
+//   * Sin Supabase → fallback DEV/demo sobre mockDatabase (modo actual).
+//
+// Con respecto al canje: NO lo dispara el cliente por sí solo — la
+// pantalla de Cliente solo puede pedir "mostrar mi QR para canjear".
+// Quien confirma el canje (rewardService.redeemReward) es Staff, igual
 // que confirma una venta — así queda auditado quién lo autorizó.
 //
 // Estado almacenado: "available" | "redeemed" | "cancelled".
@@ -26,8 +33,35 @@ function withDerivedStatus(reward) {
   return { ...reward, derivedStatus: deriveStatus(reward) };
 }
 
+function toClientReward(reward) {
+  return {
+    id: reward.id,
+    customerId: reward.customer_id,
+    cycleId: reward.cycle_id,
+    label: reward.label,
+    maxValue: reward.max_value,
+    status: reward.status,
+    earnedAt: reward.earned_at,
+    expiresAt: reward.expires_at,
+    redeemedAt: reward.redeemed_at,
+    redeemedBy: reward.redeemed_by,
+    createdAt: reward.created_at,
+  };
+}
+
 export async function getRewardsForCard(cardId) {
   await delay(250);
+
+  if (supabaseClient) {
+    const { data, error } = await supabaseClient
+      .from("rewards")
+      .select("*")
+      .eq("customer_id", cardId)
+      .order("earned_at", { ascending: false });
+    if (error) throw error;
+    return (data || []).map((reward) => withDerivedStatus(toClientReward(reward)));
+  }
+
   const cycleIds = loyaltyCycles.filter((cy) => cy.cardId === cardId).map((cy) => cy.id);
   return rewards.filter((r) => cycleIds.includes(r.cycleId)).map(withDerivedStatus);
 }
