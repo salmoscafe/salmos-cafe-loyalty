@@ -83,6 +83,18 @@
   max-width: 30ch;
 }
 .sc-screen-title { font-family: 'Instrument Serif', serif; font-size: 28px; font-weight: 400; margin: 8px 0 0; color: var(--ink); }
+.sc-tagline {
+  font-family: 'Instrument Serif', serif;
+  font-style: italic;
+  font-size: 18px;
+  line-height: 1.4;
+  font-weight: 400;
+  text-align: center;
+  margin: 4px auto 0;
+  color: var(--espresso);
+  opacity: 0.9;
+  max-width: 36ch;
+}
 
 /* ---- Card ---- */
 .sc-card {

@@ -30,7 +30,6 @@ export function HomeScreen({ customer, card, cycle, currentReward, loading, erro
       <div className={"sc-card" + (unlocked ? " sc-card--unlocked" : "")}>
         <div className="sc-card__texture" aria-hidden="true" />
         <div className="sc-card__row-top">
-          <IconMark on="navy" className="sc-card__mark" />
           <span className="sc-card__type">Miembro</span>
         </div>
 
@@ -61,6 +60,8 @@ export function HomeScreen({ customer, card, cycle, currentReward, loading, erro
           </button>
         </div>
       </div>
+
+      <p className="sc-tagline">Donde el café es un verso al paladar</p>
 
       <div className="sc-next-reward">
         <div className="sc-next-reward__icon">
