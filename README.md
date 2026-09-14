@@ -15,6 +15,51 @@ datos reales de Supabase**. El **motor de escrituras** del flujo Staff
 en el frontend, a la espera de migrarlo a las RPCs transaccionales.
 **No está "production complete".**
 
+## Current checkpoint — 2026-09-14
+
+Estado verificable del repositorio en esta fecha (checkpoint documental de Git).
+
+- **Migraciones sincronizadas `0001`–`0008`.** La `0008` es el hardening de
+  identidad de clientes: índices únicos normalizados de email/teléfono,
+  grants mínimos para `authenticated` y campos de vinculación Loyverse bajo
+  control server-side / `service_role`.
+- **Hardening H1 + C4 completado**: el navegador ya no escribe
+  `loyverse_customer_id` / `loyverse_sync_status`; la vinculación Loyverse la
+  hace la Edge Function `loyverse-customers` con la identidad del usuario
+  autenticado + `service_role`; `body.email` dejó de ser fuente de identidad;
+  la vinculación solo por teléfono queda **bloqueada hasta verificar**; los
+  índices únicos normalizados previenen duplicados/ambigüedad de identidad.
+- **Tests: 155/155 pasando** (`node --test "tests/*.test.mjs"`).
+- **Build: pasa** (`npm run build`; solo el aviso preexistente de chunk Vite
+  > 500 kB, no se tocó en este checkpoint).
+- **Sync de receipts Loyverse desplegado y validado**: Edge Function
+  `loyverse-receipts-sync`; la última corrida real procesó **979 receipts** y
+  registró **2 visitas válidas** (ventana `LOYVERSE_WINDOW_DAYS = 30` y
+  checkpoint clampado a la historia disponible del plan).
+- **La app lee datos reales de Supabase**: el cliente de prueba **Javier
+  refleja 2/8** visitas del pipeline real Loyverse → Edge Function → Supabase
+  → App Salmos.
+- **Reglas de lealtad vigentes**: recompensa en la **8ª visita**; compra
+  mínima **$50 MXN**; **máx. 1 visita válida por cliente por día**;
+  recompensa de **1 bebida o hasta $150 MXN**; vigencia **3 meses**; cancelar
+  revierte la visita y, si era la 8ª generadora, invalida la recompensa y
+  reabre el ciclo; una recompensa **ya redimida no se puede cancelar**;
+  marketing diferido para después.
+- **SMS OTP: analizado, NO implementado.** Dirección planificada: mantener
+  email/contraseña como método primario; añadir OTP por SMS más adelante
+  para A) recuperación de contraseña por teléfono y C) verificación/cambio
+  de teléfono en Settings. **Sin login passwordless.** H1+C4 se mantiene.
+- **Twilio Verify seleccionado como dirección futura** (integración nativa
+  Supabase, `provider = "twilio_verify"`), SMS solo como canal de OTP.
+  El setup de Twilio está **temporalmente pausado** (el alta de cuenta quedó
+  bloqueada por un mensaje temporal de "Too many attempts" de verificación);
+  no se implementa Twilio/SMS en este checkpoint.
+- **SMTP**: la configuración remota existente permanece intacta (sin cambios
+  en este checkpoint).
+- **Git**: rama `main`, remote `origin` → `github.com/salmoscafe/salmos-
+  cafe-loyalty`; este checkpoint se documenta en un commit de `docs:` que
+  toca únicamente `README.md`.
+
 ### Checkpoint oficial — 2026-09-14
 
 Estado documental verificado a esta fecha. Todo lo listado aquí refleja lo
