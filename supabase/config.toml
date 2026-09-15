@@ -443,6 +443,16 @@ verify_jwt = true
 [functions.loyverse-receipts-sync]
 verify_jwt = false
 
+# Función send-ticket ("Enviar por correo" del ticket de Activity).
+# Requiere JWT de usuario (verify_jwt = true): la función verifica que
+# el ticket pertenece al cliente autenticado y que el correo destino
+# SIEMPRE viene de GoTrue/customers. El envío usa las mismas credenciales
+# SMTP del bloque [auth.email.smtp] (SMTP_HOST/PORT/USER/PASS/
+# SMTP_SENDER_EMAIL/SMTP_SENDER_NAME); mientras no existan, responde
+# `email_not_configured` sin simular el envío.
+[functions.send-ticket]
+verify_jwt = true
+
 [analytics]
 enabled = true
 port = 54327

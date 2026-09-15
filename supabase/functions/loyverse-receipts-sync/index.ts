@@ -37,6 +37,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { acquireSyncClaim, releaseSyncClaim } from "../_shared/syncClaim.js";
 import {
   buildCustomerMap,
+  buildRegisterVisitWithReceiptArgs,
   decideReceiptAction,
 } from "../_shared/receiptsSyncCore.js";
 
@@ -67,6 +68,13 @@ function safeDetail(value) {
 // Visitante de success de una RPC (sin stack traces en respuestas).
 function rpcErrorOf(error) {
   return { status: error?.status, code: error?.code, message: safeDetail(error?.message) };
+}
+
+// ¿La RPC no existe en el schema? (0010 aún no aplicada). PostgREST
+// responde PGRST202 ("Could not find the function … in the schema
+// cache"). Se detecta también por mensaje por robustez.
+function isMissingRpcFunction(error) {
+  return error?.code === "PGRST202" || /could not find the function/i.test(safeDetail(error?.message || ""));
 }
 
 // ---------------------------------------------------------------
@@ -226,6 +234,7 @@ async function runReceiptsSync({ supabase, state, transport }) {
     below_minimum: 0,
     unmapped_customer: 0,
     invalid: 0,
+    detail_unavailable: 0,
   };
   const conflicts = [];
   const storeIds = new Set();
@@ -286,21 +295,33 @@ async function runReceiptsSync({ supabase, state, transport }) {
       }
 
       // decision.action === "register"
-      const { data, error } = await supabase.rpc("register_visit", decision.registerArgs);
-      if (error) {
+      // 0010: register_visit_with_receipt = register_visit (reglas intactas)
+      // + persiste el detalle del ticket (line_items → items, receipt_date).
+      // Si 0010 aún NO está aplicada en la BD (la RPC no existe en el
+      // schema, PGRST202), NO se pierde la visita: se registra con
+      // register_visit (mismas reglas de lealtad) y se cuenta
+      // detail_unavailable en el diagnóstico. El detalle llega en cuanto
+      // la migración se despliegue; nunca se inventa un ticket.
+      const detailArgs = buildRegisterVisitWithReceiptArgs({ registerArgs: decision.registerArgs, receipt });
+      let outcome = await supabase.rpc("register_visit_with_receipt", detailArgs);
+      if (outcome.error && isMissingRpcFunction(outcome.error)) {
+        counts.detail_unavailable++;
+        outcome = await supabase.rpc("register_visit", decision.registerArgs);
+      }
+      if (outcome.error) {
         // P0001 = regla de negocio (ya visitó hoy, mínimo…): avance seguro.
-        if (error.code === "P0001") {
+        if (outcome.error.code === "P0001") {
           counts.business_skipped++;
           if (conflicts.length < 20) {
-            conflicts.push({ type: "register", externalSaleId: decision.externalSaleId, message: safeDetail(error.message) });
+            conflicts.push({ type: "register", externalSaleId: decision.externalSaleId, message: safeDetail(outcome.error.message) });
           }
         } else {
           counts.business_skipped++;
-          if (!blockingError) blockingError = rpcErrorOf(error);
+          if (!blockingError) blockingError = rpcErrorOf(outcome.error);
         }
         continue;
       }
-      if (data?.reused === true) counts.reused++;
+      if (outcome.data?.reused === true) counts.reused++;
       else counts.registered++;
     }
 

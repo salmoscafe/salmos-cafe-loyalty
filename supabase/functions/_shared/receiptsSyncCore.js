@@ -30,6 +30,9 @@
 // Contrato con la migración 0007_loyverse_receipts_sync.sql:
 //   register_visit(uuid, text, numeric, date, text, text, text, text, text)
 //   cancel_visit_by_sale(text, text, text)
+// Contrato con 0010_loyverse_receipt_details.sql (detalle del ticket):
+//   register_visit_with_receipt(... args de register_visit ...,
+//     jsonb items, timestamptz receipt_date)
 // ---------------------------------------------------------------
 
 import { getBusinessDate, BUSINESS_TIMEZONE } from "./loyaltyEngineCore.js";
@@ -49,6 +52,49 @@ export const SYNC_ACTOR = Object.freeze({
   actorId: "loyverse-receipts-sync",
   actorRole: "system",
 });
+
+// ---------------------------------------------------------------
+// Versículo del ticket (migración 0011) — ES LA FUENTE DE VERDAD de
+// la asignación, y la BD lo implementa en register_visit_with_receipt.
+//   * TICKET_VERSE_IDS = ids de pasajes ELIGIBLES para el ticket
+//     (texto ≤ 160 chars y ≤ 3 líneas, los límites de psalms.js).
+//     Deriva del dataset local src/data/bible-verses.json (49 pasajes)
+//     y debe mantenerse en sincronía con bible_verse_pool (0011).
+//   * pickRandomVerseId: selección con crypto (Web Crypto global:
+//     disponible en Deno y en Node ≥ 19). NUNCA Math.random: la
+//     aleatoriedad vive en el REGISTRO, no en el render de React.
+//   * resolveVisitVerseId: espejo testeable de la regla SQL de 0011 —
+//     una visita que ya tiene verse_id lo CONSERVA (idempotencia por
+//     external_sale_id); solo una visita sin verse_id recibe uno
+//     (propuesto o aleatorio del pool).
+// ---------------------------------------------------------------
+export const TICKET_VERSE_IDS = Object.freeze([
+  2, 5, 8, 11, 15, 16, 21, 26, 28, 29,
+  34, 38, 45, 46, 47, 51, 55, 58, 60, 61,
+  62, 72, 73, 77, 78, 80, 82, 91, 92, 94,
+  96, 98, 102, 103, 105, 106, 107, 112, 119, 123,
+  124, 127, 133, 134, 136, 137, 138, 139, 145,
+]);
+
+function randomInt(maxExclusive) {
+  const rng = new Uint32Array(1);
+  crypto.getRandomValues(rng);
+  return rng[0] % maxExclusive;
+}
+
+export function pickRandomVerseId({ pool = TICKET_VERSE_IDS } = {}) {
+  if (!pool.length) return null;
+  return pool[randomInt(pool.length)];
+}
+
+export function resolveVisitVerseId({ existingVerseId = null, proposedVerseId = null, pool = TICKET_VERSE_IDS } = {}) {
+  // Regla 0011 (coalesce en SQL): lo ya asignado manda (resync = NO cambia).
+  if (existingVerseId != null) return existingVerseId;
+  // Visita nueva con id propuesto (pasado explícitamente).
+  if (proposedVerseId != null) return proposedVerseId;
+  // Visita nueva sin propuesta: selección aleatoria del pool.
+  return pickRandomVerseId({ pool });
+}
 
 // ---------------------------------------------------------------
 // Normalización
@@ -177,6 +223,55 @@ export function buildCancelArgs({ externalSaleId }) {
     p_external_sale_id: externalSaleId,
     p_actor_id: SYNC_ACTOR.actorId,
     p_actor_role: SYNC_ACTOR.actorRole,
+  };
+}
+
+// ---------------------------------------------------------------
+// Detalle del ticket (migración 0010, referencial).
+// ---------------------------------------------------------------
+
+// line_items de Loyverse → forma CLIENTE que la vista del ticket
+// renderiza: [{ name, quantity, unit_price, total }]. Defensivo ante
+// campos ausentes, cantidades/strings y precios { amount }. Nunca
+// lanza: un receipt sin líneas comerciales genera [] (desglose vacío).
+export function normalizeLineItems(line_items) {
+  if (!Array.isArray(line_items)) return [];
+  return line_items
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const quantity = Number(item.quantity ?? item.qty ?? 1);
+      const unitPrice = normalizeMoney(item.price ?? item.unit_price ?? item.total_money);
+      if (unitPrice == null) return null;
+      const qty = Number.isFinite(quantity) && quantity > 0 ? quantity : 1;
+      return {
+        name: String(item.item_name ?? item.name ?? item.title ?? "Artículo"),
+        quantity: qty,
+        unit_price: unitPrice,
+        total: normalizeMoney(item.total_money) ?? Number((unitPrice * qty).toFixed(2)),
+      };
+    })
+    .filter((item) => item !== null);
+}
+
+// Instante real de la compra (receipt_date primero, created_at como
+// respaldo). NULL solo si el receipt no trae ninguno de los dos.
+export function buildReceiptTimestamp(receipt) {
+  const ts = receipt?.receipt_date ?? receipt?.created_at ?? null;
+  if (ts == null || ts === "") return null;
+  const d = new Date(ts);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+// Argumentos EXACTOS de register_visit_with_receipt (0010): los de
+// register_visit (0007, `registerArgs` ya decidido) + p_items/
+// p_receipt_date. El negocio lo fuerza register_visit; aquí solo se
+// transporta el detalle para la vista.
+export function buildRegisterVisitWithReceiptArgs({ registerArgs, receipt }) {
+  const items = normalizeLineItems(receipt?.line_items);
+  return {
+    ...registerArgs,
+    p_items: items.length ? items : null,
+    p_receipt_date: buildReceiptTimestamp(receipt),
   };
 }
 

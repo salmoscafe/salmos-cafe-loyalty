@@ -15,6 +15,77 @@ datos reales de Supabase**. El **motor de escrituras** del flujo Staff
 en el frontend, a la espera de migrarlo a las RPCs transaccionales.
 **No está "production complete".**
 
+## Current checkpoint — 2026-09-15 — QA ticket (receipt_date, orden, verse_id)
+
+Estado verificable del repositorio tras el checkpoint de QA **aprobado** para
+el detalle del ticket (fecha real del recibo, orden cronológico, items y
+versículo persistido). Reglas de negocio sin cambios.
+
+### Arquitectura actual: Loyverse → Supabase → App
+
+```
+Loyverse (API v1.0) ──► Edge `loyverse-receipts-sync` ──► Supabase ──► App Salmos (Activity)
+                            │  register_visit_with_receipt     │
+                            └────────► loyalty_visits (items, receipt_date, verse_id)
+```
+
+- **Loyverse** sigue siendo la fuente de verdad de la venta: `GET /v1.0/receipts`
+  entrega `receipt_number`, `receipt_date`, `line_items`, `cancelled_at`, etc.
+  (solo server-side).
+- La Edge Function sincroniza por ventana `updated_at` y registra cada venta
+  elegible como visita con `external_sale_id =
+  loyverse_receipt_<store>_<receipt_number>` (idempotente por UNIQUE).
+- **`receipt_date` = fecha REAL del ticket de Loyverse** (instante de la
+  compra); **`created_at` = fecha de sincronización** (cuándo la Edge escribió
+  la fila). La vista Cliente muestra `receipt_date`; `created_at` es solo
+  fallback mientras `0010` no esté aplicada.
+
+### Orden y progreso
+
+- **Activity ordena los tickets de más reciente a más antiguo** usando la
+  fecha real del ticket (`receipt_date` → `visit_date` → `created_at`):
+  `saleOrdering.visitSortTimestamp` + `compareVisitsDesc`.
+- **El progreso histórico se calcula cronológicamente**:
+  `computeCycleProgress` ordena las visitas de cada ciclo por fecha real del
+  recibo y deriva, para cada visita, cuántas visitas activas la preceden.
+  No hay contador almacenado: el progreso se deriva de `loyalty_visits`.
+
+### Ticket y versículo persistido
+
+- Cada visita puede tener un **`verse_id` persistido (migración `0011`)**:
+  se asigna al registrar la visita (aleatorio del pool `bible_verse_pool`) y
+  se conserva ante re-sync. El ticket imprime ese versículo; solo las visitas
+  históricas previas a `0011` caen al versículo del día como fallback.
+- El detalle del ticket (`items` y `receipt_date`) lo persiste
+  `register_visit_with_receipt` (`0010`) **sin cambiar** las reglas de lealtad
+  de `register_visit`.
+
+### Reglas de fidelidad vigentes (sin cambios)
+
+- Recompensa en la **8ª visita** del ciclo.
+- Compra mínima: **$50 MXN**.
+- **Máximo 1 visita válida por cliente por día** (índice único parcial
+  `(customer_id, visit_date) WHERE status = 'active'`) — sin cambios.
+- Recompensa: 1 bebida o hasta **$150 MXN** de consumo.
+- Vigencia: **3 meses** desde que se gana.
+- Cancelar una compra **revierte la visita**; si era la 8ª generadora, invalida
+  la recompensa y reabre el ciclo; una recompensa ya redimida no se cancela.
+
+### QA aprobado
+
+- Se limpió **solo** el historial de prueba del cliente Javier en
+  `loyalty_visits` (nada de Loyverse se modificó ni borró).
+- Se retrocedió temporalmente `loyverse_sync_state.updated_at_min` a
+  `2026-09-07` y se reejecutó `loyverse-receipts-sync`:
+  - `receipts: 297` · `registered: 4` · `reused: 0` · `detail_unavailable: 0`.
+- Tickets reconstruidos: `1-0759` → visita 1 · `1-0784` → visita 2 ·
+  `1-0980` → visita 3 · `1-0997` → visita 4.
+- Los 4 tienen `receipt_date` proveniente de Loyverse y `verse_id` persistido.
+- **Activity verificado manualmente**: muestra `4 → 3 → 2 → 1`; los items de
+  cada ticket aparecen correctamente.
+- (**En curso de cierre del checkpoint:** los commits de esta entrega se
+  publican en GitHub al aprobarse.)
+
 ## Current checkpoint — 2026-09-14
 
 Estado verificable del repositorio en esta fecha (checkpoint documental de Git).
@@ -140,7 +211,7 @@ Reglas implementadas en el motor SQL (migraciones `0002`/`0005`/`0007`):
   ya-cancelado responde `already_cancelled`; reward redimida → conflicto
   de negocio que no rompe el avance del watermark.
 
-#### 4) Base de datos — migraciones `supabase/migrations/` `0001`–`0007`
+#### 4) Base de datos — migraciones `supabase/migrations/` `0001`–`0011`
 
 | Migración | Propósito (relacionado con loyalty/sync) |
 |---|---|
@@ -151,6 +222,10 @@ Reglas implementadas en el motor SQL (migraciones `0002`/`0005`/`0007`):
 | `0005_loyalty_engine.sql` | RPCs `register_visit`, `cancel_visit`, `redeem_reward`, `assert_loyalty_actor`, `visit_summary`; columnas `required_visits`, `source` |
 | `0006_loyverse_sync_claim.sql` | Claim atómico de sync de clientes (`loyverse_sync_claim`/`_at`) |
 | `0007_loyverse_receipts_sync.sql` | `triggered_reward_id`, `cancel_visit_by_sale`, tabla `loyverse_sync_state`; RPCs de `0005` recreadas |
+| `0008_customers_identity_hardening.sql` | Hardening de identidad: índices únicos normalizados de email/teléfono, grants mínimos, vinculación Loyverse server-side |
+| `0009_reward_redemptions.sql` | Evidencia de redenciones detectadas en receipts (`reward_redemptions`), idempotente por receipt+discount |
+| `0010_loyverse_receipt_details.sql` | `loyalty_visits.items` (line_items normalizados) y `loyalty_visits.receipt_date` (fecha REAL del cobro, distinta de `created_at`); RPC `register_visit_with_receipt` |
+| `0011_visit_verse_id.sql` | `loyalty_visits.verse_id` (versículo FIJO por visita) + tabla `bible_verse_pool` (pasajes elegibles); asignación conservada ante re-sync |
 
 #### 5) Frontend
 
@@ -262,7 +337,7 @@ Reglas implementadas en el motor SQL (migraciones `0002`/`0005`/`0007`):
 - ✅ **Navegación real por URL** (`/`, `/Staff`, `/Admin`) y **UI de Cliente/Auth limpia** (sin selector de demo; login "Bienvenido"; icono de Google).
 - ✅ **Desplegado y validado en producción**: migraciones `0001`–`0006` aplicadas en el ambiente real y Edge Function `loyverse-customers` activa (`verify_jwt = true`).
 - ✅ **Corrección de concurrencia Loyverse** validada con QA real: 2 invocaciones simultáneas → solo una procede; la perdedora responde `409 loyverse_sync_in_progress` (retriable) sin crear cliente duplicado.
-- ✅ **Sync de receipts Loyverse** (Fase D2-v1): migración `0007` + Edge `loyverse-receipts-sync` (secret `x-sync-secret`, watermark en `loyverse_sync_state`, ventana de 30 días, idempotencia y cancelaciones) validado con sync real (**979 receipts** procesados).
+- ✅ **Sync de receipts Loyverse** (Fase D2-v1): migración `0007` + Edge `loyverse-receipts-sync` (secret `x-sync-secret`, watermark en `loyverse_sync_state`, ventana de 30 días, idempotencia y cancelaciones) validado con sync real. Migraciones `0009`/`0010`/`0011` añaden evidencia de redención, detalle del ticket (`items`/`receipt_date`) y versículo por visita (`verse_id`). QA 2026-09-15: **297 receipts** procesados, **4 visitas** registradas/reconstruidas.
 - ✅ **Lecturas reales del Cliente**: Home y pantallas derivadas leen tarjeta/ciclo/visitas/recompensas directamente de Supabase (RLS) — `loyaltyService`/`rewardService` con fallback demo.
 - ✅ **Templates de email branded** para Supabase Auth en `email-templates/` (confirm-signup, reset-password, otp, change-email, welcome) + scripts `scripts/build-templates-payload.py` y `scripts/patch-email-templates.ps1`; el sistema legacy `supabase/templates/` fue eliminado.
 - ✅ **Variables de entorno documentadas** en `.env.example`: SMTP custom (`SMTP_HOST`/`SMTP_PORT`/`SMTP_USER`/`SMTP_PASS`/`SMTP_ADMIN_EMAIL`/`SMTP_SENDER_NAME`) y Google OAuth (`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`). Los secretos reales **jamás** se guardan en Git y `.env` permanece gitignored.
@@ -343,11 +418,13 @@ Ver `tests/loyalty.test.mjs`, `tests/loyverse-sync.test.mjs` y
 
 ## Tests / calidad
 
-- **203 tests pasando** (`npm test`): motor de lealtad (`loyalty`),
+- **223 tests pasando** (`npm test`): motor de lealtad (`loyalty`),
   sincronización de clientes Loyverse (`loyverse-sync`), sync de receipts
   (`receipts-sync-core`), motor SQL (`loyalty-engine`), claim atómico
-  (`sync-claim`), single-flight, flujo de auth, navegación por pathname
-  y dataset local de Salmos (`psalms`).
+  (`sync-claim`), single-flight, flujo de auth, navegación por pathname,
+  dataset local de Salmos (`psalms`), detalle del ticket (`code128`),
+  asignación de versículos (`verse-assignment`) y orden cronológico de
+  visitas (`visit-ordering`).
 - `npm run build` compila sin errores (hay un aviso **preexistente** de
   tamaño de chunk de Vite > 500 kB, no introducido por el sync).
 - `npm audit` reporta **0 vulnerabilidades**.
@@ -566,13 +643,14 @@ aplicaron al ambiente real**:
 
 1. Migraciones aplicadas en remoto: `0001`–`0007` (incluye `0004`
    `loyverse_updated`, `0006` del claim atómico de sync y `0007` del sync
-   de receipts).
+   de receipts), más `0009`/`0010`/`0011` (redevención, detalle del ticket
+   y versículo por visita) probadas en el QA 2026-09-15.
 2. Edge Function `loyverse-customers` desplegada y activa (`verify_jwt =
    true`) con `_shared/syncClaim.js` y `loyverseCore.js` actualizado.
-3. `loyverse-receipts-sync` **validada con una corrida real** (979 receipts
-   procesados; checkpoint en `loyverse_sync_state`). El **scheduler/cron
-   formal** que la invoque con `x-sync-secret` sigue pendiente de
-   definirse en el ambiente productivo.
+3. `loyverse-receipts-sync` **validada con corridas reales** (QA 2026-09-15:
+   297 receipts procesados y 4 visitas reconstruidas; checkpoint en
+   `loyverse_sync_state`). El **scheduler/cron formal** que la invoque con
+   `x-sync-secret` sigue pendiente de definirse en el ambiente productivo.
 
 Comportamiento de concurrencia en producción: dos invocaciones simultáneas del
 mismo perfil → la primera adquiere el claim de `customers`
@@ -628,7 +706,9 @@ src/
                            recuperación por OTP/provisioning)
     loyalty/               StampTrack, SyncBanner, DailyVerse
                            (DailyVerse disponible; oculto del Home)
-    activity/              TicketVerse (versículo en ticket de fidelidad)
+    activity/              TicketVerse (versículo persistido por visita),
+                           ReceiptPrinter (detalle POS del ticket),
+                           Code128Barcode (código de barras real del ticket)
   screens/client/          Home, Recompensas, Actividad, Perfil, Configuración
   screens/staff/           Home, Escanear, Cliente encontrado,
                             Registrar venta (con sucursal), Confirmación, Actividad
@@ -642,6 +722,12 @@ src/
     psalms.js              funciones puras sobre bible-verses.json
                            (getDailyPassage, getDailyShortPassage,
                            getPassagesByTag, getAllTags, etc.)
+    ticketVerse.js         resolución del pasaje del ticket: verse_id
+                           persistido o versículo del día como fallback
+    saleOrdering.js        orden cronológico de visitas para Activity
+                           (receipt_date → visit_date → created_at)
+    code128.js             generación de código de barras Code 128
+    receiptPdf.js          exportación del ticket a PDF
   App.jsx                  orquestador raíz + resolución de experiencia por URL
   styles.css               identidad visual completa (paleta real del logo)
 tests/loyalty.test.mjs              suite del motor de fidelización (node --test)
@@ -655,6 +741,9 @@ tests/navigation.test.mjs           suite de navegación por pathname (sin route
 tests/psalms.test.mjs                suite del dataset local de Salmos (getPassageById,
                                      getPassagesByTag, getDailyPassage,
                                      getDailyShortPassage, inmutabilidad)
+tests/code128.test.mjs              suite de generación/codificación Code 128
+tests/verse-assignment.test.mjs     regla de asignación/conservación de verse_id
+tests/visit-ordering.test.mjs       orden de visitas y progreso cronológico (receipt_date)
 
 email-templates/            fuente única de las 5 plantillas de email branded
   confirm-signup.html       type key `confirmation`
@@ -670,12 +759,15 @@ scripts/
 
 supabase/
   config.toml                          subjects + content_path de templates (fuente única: email-templates/)
-  migrations/                          0001–0007 (esquema, RPCs, loyalty_engine, sync_claim, loyverse_sync_state)
+  migrations/                          0001–0011 (esquema, RPCs, loyalty_engine, sync_claim,
+                                        loyverse_sync_state, detalle del ticket 0010,
+                                        versículo por visita 0011, redenciones 0009)
   functions/_shared/loyaltyEngineCore.js
   functions/_shared/syncClaim.js       claim atómico por fila
   functions/_shared/receiptsSyncCore.js lógica pura compartida del sync de receipts
   functions/loyverse-customers/        Edge Function (verify_jwt = true) — sync de clientes
   functions/loyverse-receipts-sync/    Edge Function (verify_jwt = false, x-sync-secret) — sync de receipts
+  functions/send-ticket/               Edge Function (verify_jwt = true) — envío del ticket por correo
   functions/loyalty-engine/            función del motor de lealtad (escrituras, ver Roadmap)
   templates/                           ELIMINADO — reemplazado por email-templates/ (raíz del repo)
 ```
@@ -706,9 +798,10 @@ confirma Staff, nunca el cliente.
 | Pieza | Estado |
 |---|---|
 | Motor de fidelización (monto mínimo, límite diario, 8ª visita, expiración, cancelación/reversión, idempotencia) | Real — reglas en Postgres (RPCs `0005`/`0007`) + `services/`, cubierto por tests |
-| Datos de lealtad — **lecturas del cliente** (tarjeta, ciclo, visitas, recompensas) | Real (Postgres, RLS) — Home/Recompensas/Actividad/Perfil; refleja 2/8 |
+| Datos de lealtad — **lecturas del cliente** (tarjeta, ciclo, visitas, recompensas) | Real (Postgres, RLS) — Home/Recompensas/Actividad/Perfil; QA 2026-09-15: 4 visitas reconstruidas (4 → 3 → 2 → 1) |
 | Datos de lealtad — **escrituras** (venta manual, canje, cancelación desde la app) | Mock — pendiente migrar a las RPCs transaccionales (`register_visit`/`cancel_visit`/`redeem_reward`) y eliminar `ensureLoyaltyProfile`/`mockDatabase` |
-| Sync de receipts Loyverse | Real — Edge `loyverse-receipts-sync` (secret, ventana 30 días, watermark `loyverse_sync_state`); corrida real validada (979 receipts); scheduler cron formal pendiente |
+| Sync de receipts Loyverse | Real — Edge `loyverse-receipts-sync` (secret, ventana 30 días, watermark `loyverse_sync_state`); QA 2026-09-15: 297 receipts procesados y 4 visitas registradas con `receipt_date`/`items`/`verse_id`; scheduler cron formal pendiente |
+| Detalle del ticket (Activity → recibo) | Real — `loyalty_visits.items/receipt_date` (0010) + `verse_id` (0011); `ReceiptPrinter` renderiza items reales, fecha del recibo, progreso y versículo persistido; PDF (Code 128) y envío por correo (`send-ticket`) disponibles (SMTP pendiente para el envío real) |
 | Auth Cliente (correo/teléfono + contraseña; OTP solo recuperación; Google; sesión persistente, Supabase) | Real, con `.env`; demo mock sin `.env` (facade `authService`) |
 | Perfil `customers` + `customer_code` | Real (Postgres, RLS) cuando está configurado |
 | Sync Loyverse (crear/vincular/actualizar clientes sin duplicar, con reintento, conflicto de identidad y auditoría `loyverse_updated`) | Real vía Edge Function desplegada (`verify_jwt = true`); migraciones `0001`–`0007` aplicadas en remoto; concurrencia validada en el ambiente real |

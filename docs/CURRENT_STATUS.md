@@ -7,7 +7,26 @@ Loyverse"** implementada (código listo, **sin commit ni push**). Todo lo
 documentado aquí fue verificado contra el código real y el proyecto remoto;
 nada se da por sentado de la documentación.
 
-Última actualización: 2026-09-11.
+Última actualización: 2026-09-15.
+
+---
+
+## Actualización 2026-09-15 — QA aprobado: detalle del ticket (receipt_date, items, verse_id) y orden cronológico
+
+Checkpoint de cierre documental. Reglas de negocio **sin cambios** (recompensa en la 8ª visita, mínimo $50, **1 visita válida por día**, $150/bebida, 3 meses, cancelación revierte).
+
+- **Migraciones nuevas** (ver `supabase/migrations/`): `0008` (hardening de identidad, ya rastreada), `0009` (evidencia de redención en receipts), `0010` (`loyalty_visits.items` = line_items normalizados + `loyalty_visits.receipt_date` = instante REAL del cobro; `created_at` sigue siendo el instante de sincronización), `0011` (`loyalty_visits.verse_id` fijo por visita + `bible_verse_pool`).
+- **Edge `loyverse-receipts-sync`**: ahora registra con `register_visit_with_receipt` (0010) cuando existe la RPC; si aún no está aplicada (PGRST202) cae a `register_visit` (mismas reglas) y cuenta `detail_unavailable` — nunca inventa un ticket. La lógica pura (`_shared/receiptsSyncCore.js`) expone `normalizeLineItems`, `buildReceiptTimestamp` y `buildRegisterVisitWithReceiptArgs`.
+- **Orden de visitas (Actividad)**: `saleOrdering.js` ordena de más reciente a más antigua por fecha REAL del ticket (`receipt_date` → `visit_date` → `created_at`); `salesService.computeCycleProgress` deriva el progreso histórico cronológicamente (1..N), sin contador almacenado.
+- **Versículo persistido**: cada visita conserva su `verse_id` (0011); el ticket lo imprime (`TicketVerse`/`resolveTicketPassage`); visitas históricas caen al versículo del día como fallback.
+- **QA real ejecutado y APROBADO** (ambiente de pruebas, cliente Javier):
+  - Se limpió **solo** el historial de `loyalty_visits` del cliente (nada de Loyverse se tocó).
+  - `loyverse_sync_state.updated_at_min` retrocedido temporalmente a `2026-09-07` y se reejecutó el sync.
+  - Resultado: `receipts: 297` · `registered: 4` · `reused: 0` · `detail_unavailable: 0`.
+  - Tickets reconstruidos: `1-0759 → visita 1` · `1-0784 → visita 2` · `1-0980 → visita 3` · `1-0997 → visita 4`. Los 4 con `receipt_date` de Loyverse y `verse_id` persistido.
+  - **Activity verificado manualmente**: muestra `4 → 3 → 2 → 1`; items de cada ticket correctos.
+- **Tests: 223/223** (`npm test`); **build OK** (`npm run build`, solo el aviso preexistente de chunk Vite > 500 kB).
+- PENDIENTE (sin cambios respecto a lo documentado): escrituras Staff sobre RPCs, scheduler cron formal de `loyverse-receipts-sync`, SMTP real para el envío de tickets por correo (`send-ticket` responde `email_not_configured`).
 
 ---
 

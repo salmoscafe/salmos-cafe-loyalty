@@ -21,12 +21,15 @@ import {
   buildCancelArgs,
   buildCustomerMap,
   buildExternalSaleId,
+  buildReceiptTimestamp,
   buildRegisterVisitArgs,
+  buildRegisterVisitWithReceiptArgs,
   buildVisitDate,
   classifyReceipt,
   decidePage,
   decideReceiptAction,
   isCancelledReceipt,
+  normalizeLineItems,
   normalizeMoney,
   resolveCustomer,
 } from "../supabase/functions/_shared/receiptsSyncCore.js";
@@ -292,4 +295,93 @@ test("decidePage: página vacía no rompe el summary", () => {
   const { decisions, summary } = decidePage({ receipts: [], customerMap: makeCustomerMap() });
   assert.deepEqual(decisions, []);
   assert.equal(summary.count, 0);
+});
+
+// ---------------------------------------------------------------
+// Detalle del ticket (0010) — line_items → items, receipt_date
+// ---------------------------------------------------------------
+test("normalizeLineItems: mapea line_items de Loyverse a la forma cliente", () => {
+  const items = normalizeLineItems([
+    { name: "Latte", quantity: 2, price: 70 },
+    { name: "Croissant", quantity: "1", price: { amount: 55, currency: "MXN" } },
+    { name: "Cold brew", price: 60, total_money: 60 },
+  ]);
+  assert.deepEqual(items, [
+    { name: "Latte", quantity: 2, unit_price: 70, total: 140 },
+    { name: "Croissant", quantity: 1, unit_price: 55, total: 55 },
+    { name: "Cold brew", quantity: 1, unit_price: 60, total: 60 },
+  ]);
+});
+
+test("normalizeLineItems: item_name de Loyverse tiene prioridad sobre name/title", () => {
+  const items = normalizeLineItems([
+    { item_name: "Chai Especias Frío", price: 70 },
+    { item_name: "Café", name: "Nombre viejo", price: 60 },
+    { title: "Solo con title", price: 50 },
+    { price: 45 },
+  ]);
+  assert.deepEqual(items.map((i) => i.name), [
+    "Chai Especias Frío",
+    "Café",
+    "Solo con title",
+    "Artículo",
+  ]);
+});
+
+test("normalizeLineItems: defensivo ante líneas malformadas", () => {
+  assert.deepEqual(normalizeLineItems(null), []);
+  assert.deepEqual(normalizeLineItems(undefined), []);
+  assert.deepEqual(normalizeLineItems([null, { name: "x" }, { price: "no-es-numero" }]), []);
+});
+
+test("normalizeLineItems: cantidad inválida cae a 1 sin lanzar", () => {
+  const items = normalizeLineItems([{ name: "Café", quantity: -3, price: 60 }]);
+  assert.equal(items[0].quantity, 1);
+  assert.equal(items[0].total, 60);
+});
+
+test("buildReceiptTimestamp: receipt_date primero, created_at como respaldo", () => {
+  const receipt = makeReceipt({ receipt_date: "2026-09-12T07:05:00Z", created_at: "2026-09-13T01:00:00Z" });
+  assert.equal(buildReceiptTimestamp(receipt), "2026-09-12T07:05:00.000Z");
+  assert.equal(buildReceiptTimestamp(makeReceipt({ receipt_date: null })), "2026-09-12T07:05:00.000Z");
+  assert.equal(buildReceiptTimestamp(makeReceipt({ receipt_date: null, created_at: null })), null);
+  assert.equal(buildReceiptTimestamp(makeReceipt({ receipt_date: "no-es-fecha" })), null);
+});
+
+test("buildRegisterVisitWithReceiptArgs: args de register_visit + p_items/p_receipt_date (0010)", () => {
+  const registerArgs = buildRegisterVisitArgs({
+    receipt: makeReceipt(),
+    customer: { id: "cust-a" },
+    externalSaleId: "loyverse_receipt_store-tj-1_1-0002",
+    visitDate: "2026-09-12",
+  });
+  const args = buildRegisterVisitWithReceiptArgs({
+    registerArgs,
+    receipt: makeReceipt({
+      line_items: [{ name: "Latte", quantity: 1, price: { amount: 70 } }],
+      receipt_date: "2026-09-12T07:05:00Z",
+    }),
+  });
+
+  // El negocio sigue siendo EXACTAMENTE register_visit...
+  assert.deepEqual(args.p_customer_id, "cust-a");
+  assert.equal(args.p_amount, 120);
+  assert.equal(args.p_visit_date, "2026-09-12");
+  assert.equal(args.p_source, SOURCE_LOYVERSE);
+  assert.equal(args.p_actor_role, "system");
+  // ... y el detalle del ticket viaja aparte (0010).
+  assert.deepEqual(args.p_items, [{ name: "Latte", quantity: 1, unit_price: 70, total: 70 }]);
+  assert.equal(args.p_receipt_date, "2026-09-12T07:05:00.000Z");
+});
+
+test("buildRegisterVisitWithReceiptArgs: sin líneas → p_items null, sin fecha → p_receipt_date null", () => {
+  const registerArgs = buildRegisterVisitArgs({
+    receipt: makeReceipt(),
+    customer: { id: "cust-a" },
+    externalSaleId: "loyverse_receipt_s_1",
+    visitDate: "2026-09-12",
+  });
+  const args = buildRegisterVisitWithReceiptArgs({ registerArgs, receipt: makeReceipt({ receipt_date: null, created_at: null }) });
+  assert.equal(args.p_items, null);
+  assert.equal(args.p_receipt_date, null);
 });

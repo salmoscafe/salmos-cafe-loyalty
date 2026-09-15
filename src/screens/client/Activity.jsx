@@ -1,12 +1,15 @@
 import React, { useEffect, useState } from "react";
 import { Icon } from "../../components/common/icons.jsx";
 import { Spinner, ErrorState, EmptyState } from "../../components/common/ui.jsx";
+import { ReceiptPrinter } from "../../components/activity/ReceiptPrinter.jsx";
 import { salesService, rewardService } from "../../services/index.js";
 import { formatCurrency, formatDateTime } from "../../lib/format.js";
 
 export function ActivityScreen({ customer, card }) {
   const [events, setEvents] = useState(null);
   const [error, setError] = useState(null);
+  const [selectedSale, setSelectedSale] = useState(null);
+  const [printKey, setPrintKey] = useState(0);
 
   useEffect(() => {
     if (!customer || !card) return;
@@ -15,7 +18,7 @@ export function ActivityScreen({ customer, card }) {
     async function load() {
       try {
         const [sales, rewards] = await Promise.all([
-          salesService.getSalesForCustomer(customer.id),
+          salesService.getSalesForCustomer(customer.profileId || customer.id),
           rewardService.getRewardsForCard(card.id),
         ]);
         if (cancelled) return;
@@ -23,8 +26,11 @@ export function ActivityScreen({ customer, card }) {
         const purchaseEvents = sales.map((s) => ({
           id: s.id,
           type: s.status === "cancelled" ? "purchase_cancelled" : "purchase",
-          date: s.status === "cancelled" ? s.cancelledAt : s.createdAt,
+          date:
+            s.receiptDate ||
+            (s.status === "cancelled" ? s.cancelledAt : s.createdAt),
           amount: s.amount,
+          sale: s,
         }));
 
         const rewardEvents = rewards.flatMap((r) => {
@@ -63,6 +69,27 @@ export function ActivityScreen({ customer, card }) {
     reward_expired: (ev) => `Recompensa vencida · ${ev.label}`,
   };
 
+  function openReceipt(ev) {
+    setPrintKey((k) => k + 1);
+    setSelectedSale(ev.sale);
+  }
+
+  function backToActivity() {
+    setSelectedSale(null);
+  }
+
+  if (selectedSale) {
+    return (
+      <div className="sc-screen">
+        <button type="button" className="sc-back-link" onClick={backToActivity}>
+          <Icon.ArrowLeft className="sc-icon-sm" />
+          Actividad
+        </button>
+        <ReceiptPrinter key={printKey} sale={selectedSale} onClose={backToActivity} />
+      </div>
+    );
+  }
+
   return (
     <div className="sc-screen">
       <h1 className="sc-screen-title">Actividad</h1>
@@ -73,24 +100,50 @@ export function ActivityScreen({ customer, card }) {
         <EmptyState title="Todavía no hay actividad." hint="Tu primera visita aparecerá aquí." />
       )}
       {!error && events && events.length > 0 && (
-        <ul className="sc-timeline">
-          {events.map((ev, idx) => (
-            <li key={ev.id} className="sc-timeline__item">
-              <span className="sc-timeline__dot">
-                {ev.type === "purchase" && <Icon.Receipt className="sc-icon-sm" />}
-                {ev.type === "purchase_cancelled" && <Icon.Close className="sc-icon-sm" />}
-                {ev.type === "reward_earned" && <Icon.Gift className="sc-icon-sm" />}
-                {ev.type === "reward_redeemed" && <Icon.Check className="sc-icon-sm" />}
-                {(ev.type === "reward_cancelled" || ev.type === "reward_expired") && <Icon.Close className="sc-icon-sm" />}
-              </span>
-              {idx !== events.length - 1 && <span className="sc-timeline__line" />}
-              <span className="sc-timeline__body">
-                <span className="sc-timeline__title">{LABELS[ev.type](ev)}</span>
-                <span className="sc-timeline__meta">{formatDateTime(ev.date)}</span>
-              </span>
-            </li>
-          ))}
+        <>
+          <h2 className="sc-section-label sc-timeline-label">Tus visitas</h2>
+          <ul className="sc-timeline">
+          {events.map((ev, idx) => {
+            const isPurchase = ev.type === "purchase" || ev.type === "purchase_cancelled";
+            const inner = (
+              <>
+                <span className="sc-timeline__dot">
+                  {ev.type === "purchase" && <Icon.Receipt className="sc-icon-sm" />}
+                  {ev.type === "purchase_cancelled" && <Icon.Close className="sc-icon-sm" />}
+                  {ev.type === "reward_earned" && <Icon.Gift className="sc-icon-sm" />}
+                  {ev.type === "reward_redeemed" && <Icon.Check className="sc-icon-sm" />}
+                  {(ev.type === "reward_cancelled" || ev.type === "reward_expired") && <Icon.Close className="sc-icon-sm" />}
+                </span>
+                <span className="sc-timeline__body">
+                  <span className="sc-timeline__title">{LABELS[ev.type](ev)}</span>
+                  <span className="sc-timeline__meta">{formatDateTime(ev.date)}</span>
+                </span>
+                {isPurchase && <Icon.ChevronRight className="sc-icon-sm sc-timeline__chevron" />}
+              </>
+            );
+
+            return (
+              <li key={ev.id} className="sc-timeline__item">
+                {idx !== events.length - 1 && <span className="sc-timeline__line" />}
+                {isPurchase ? (
+                  <button
+                    type="button"
+                    className={`sc-timeline__hit sc-timeline__hit--${ev.type}`}
+                    onClick={() => openReceipt(ev)}
+                    aria-label={`Ver detalle de ${LABELS[ev.type](ev)}`}
+                  >
+                    {inner}
+                  </button>
+                ) : (
+                  <span className="sc-timeline__hit" aria-hidden="true">
+                    {inner}
+                  </span>
+                )}
+              </li>
+            );
+          })}
         </ul>
+        </>
       )}
     </div>
   );
