@@ -86,6 +86,91 @@ Loyverse (API v1.0) ──► Edge `loyverse-receipts-sync` ──► Supabase �
 - (**En curso de cierre del checkpoint:** los commits de esta entrega se
   publican en GitHub al aprobarse.)
 
+## Estado verificado — 2026-09-15
+
+Verificación puntual (auditoría) del repositorio en esta fecha, **complementaria**
+del checkpoint de QA anterior (no lo reemplaza ni lo contradice). Todo se verificó
+ejecutando contra `C:\Users\javier.castro\Documents\Personal\Projects\App Salmos LC`.
+
+### Tests y build
+
+- **`npm test` → 243/243 pasando** (`node --test` sobre `tests/*.test.mjs`).
+  Incluyen las suites nuevas `send-ticket-email` (paridad del correo del ticket
+  contra `psalms.js`/`ticketVerse.js`/`code128.js`/`salesService`/`receiptsSyncCore`)
+  y `smtp-conn` (resolución del puerto SMTP).
+- **`npm run build` → ✓ en 3.07s.** Solo el aviso **preexistente** de chunk Vite
+  > 500 kB (`index-*.js` 595.29 kB, gzip 196.70 kB); sin errores.
+
+### Estado de git
+
+- Rama `main`, **up to date con `origin/main`**. Último commit: `b3e8047`
+  ("feat: finalize Loyverse receipt sync and ticket ordering").
+- Working tree con cambios **sin commitear** (etapa de tickets/email), sin secretos:
+
+  *Modificados:*
+  - `.env.example` — documenta las variables SMTP de `send-ticket`
+    (`SMTP_HOST/PORT/USER/PASS/SENDER_EMAIL/SENDER_NAME/APP_URL`); solo nombres/documentación.
+  - `src/styles.css` — espaciado de `.sc-receipt-actions__btn` (gap 10→14, margin-top 6→18).
+  - `supabase/functions/send-ticket/index.ts` — reenvío del ticket por correo
+    (transporte nodemailer, verificación de propiedad del ticket por JWT).
+
+  *Sin trackear:*
+  - `supabase/functions/_shared/smtpConn.js` (resolución de puerto SMTP, default 465).
+  - `supabase/functions/_shared/ticketEmail.js` (renderer HTML del correo).
+  - `supabase/functions/_shared/ticketEmailCode128.js` (folio + Code 128).
+  - `supabase/functions/_shared/ticketEmailVerses.js` (pool de 49 pasajes elegibles).
+  - `tests/send-ticket-email.test.mjs`, `tests/smtp-conn.test.mjs`.
+  - `email-templates/assets/wordmark-navy.png` (logo navy del ticket del correo).
+
+### Tickets / email / SMTP (verificado leyendo la implementación)
+
+- Edge `send-ticket` (`verify_jwt = true`): el correo destino sale **siempre** de
+  `user.email`/`customers.email` (el payload no puede fijarlo); el ticket se
+  verifica como propio por `customer_id` + `external_sale_id` (RLS del cliente,
+  sin `service_role`); sin SMTP configurado responde `email_not_configured`
+  (no simula el envío); los errores SMTP se sanitizan (redacta user/pass).
+- **Transporte: `nodemailer` (`npm:nodemailer@^9`)** sustituyó a `deno.land/x/smtp`
+  (API Deno 1.x obsoleta → `Deno.writeAll is not a function`). Gmail con implicit
+  TLS en 465 (`secure: port === 465`); 587 → STARTTLS automático.
+- El correo renderiza: wordmark cream (header) y navy (ticket), items reales,
+  TOTAL, estado de lealtad (activa+recompensa / activa / cancelada), versículo
+  persistido (`verse_id` → pool de 49, fallback por fecha) y barcode Code 128
+  (folio = último segmento de `external_sale_id` > `external_sale_id` > `id`);
+  CTA "Abrir mi tarjeta" **solo** si `SMTP_APP_URL` está definida. La suite
+  `assertNoFakeData` garantiza que el HTML nunca contiene datos de ejemplo.
+- **Envío real: pendiente** — falta configurar SMTP en el entorno de la Edge y
+  cerrar dominio/SPF/DKIM/DMARC (externo al repo).
+
+### Loyverse / Supabase (verificado leyendo migraciones y core)
+
+- Migraciones `0001`–`0011` presentes; revisadas en esta auditoría:
+  `register_visit_with_receipt` (0010/0011) persiste `items`/`receipt_date`/
+  `verse_id` sin tocar las reglas de `register_visit`; pool `bible_verse_pool`
+  (49 ids == `TICKET_VERSE_IDS` == los pasajes elegibles del dataset).
+- Reglas de fidelidad confirmadas sin cambios: 8ª visita, mín. $50 MXN,
+  máx. 1 visita/día, recompensa hasta $150 MXN, vigencia 3 meses, cancelación
+  revierte la visita, idempotencia por `external_sale_id` UNIQUE.
+- `receiptsSyncCore`/`loyverseCore`/`syncClaim` revisados: `external_sale_id =
+  loyverse_receipt_<store>_<receipt_number>`, ventana `LOYVERSE_WINDOW_DAYS = 30`,
+  watermark `loyverse_sync_state`, claim atómico por fila (lease 10 min, `409
+  loyverse_sync_in_progress` retriable).
+
+### Diferencias y pendientes encontrados
+
+- **Conteo de tests**: el README contiene conteos históricos (155/155 en un QA
+  previo y 223 en "Tests / calidad"); el número real al día de hoy es **243/243**.
+- **Discrepancia documental menor**: el bloque nuevo de `.env.example` y
+  `tests/smtp-conn.test.mjs` aún describen `deno.land/x/smtp`/`connectTLS`, pero
+  la implementación real usa `nodemailer`. No afecta la regla de puerto (465),
+  pero conviene sincronizarlos.
+- **`Cafe Salmos`**: la carpeta de trabajo de esta sesión era un scaffold vacío
+  del CLI de Supabase (guardaba solo `supabase/.temp/linked-project.json`, sin
+  código ni git), distinta del repo real; se dejó **intacta** y no forma parte
+  del commit.
+- Pendientes del proyecto (sin cambios respecto al checkpoint): escrituras Staff
+  sobre las RPCs, scheduler/cron formal de `loyverse-receipts-sync`, QR firmado,
+  dominio/SPF/DKIM/DMARC para correos y despliegue de `send-ticket`.
+
 ## Current checkpoint — 2026-09-14
 
 Estado verificable del repositorio en esta fecha (checkpoint documental de Git).

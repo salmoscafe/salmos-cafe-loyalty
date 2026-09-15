@@ -22,18 +22,21 @@
 // Despliegue: supabase functions deploy send-ticket
 // Vars: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
 //       SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_SENDER_EMAIL,
-//       SMTP_SENDER_NAME
+//       SMTP_SENDER_NAME, SMTP_APP_URL (opcional, solo para el CTA)
 // ---------------------------------------------------------------
 //
-// [SMTP_PENDIENTE] El cliente SMTP es un import de deno.land/x/smtp
-// (0.7.0, puro Deno). Si al desplegar el CLI no lo puede empaquetar,
-// sustituir por el proveedor que se use y NO tocar el resto del flujo.
-// Estado: el diseño HTML del correo y la verificación de propiedad ya
-// están listos; solo falta el transporte SMTP real (proveedor + dominio
-// + SPF/DKIM/DMARC, ver config.toml §auth.email.smtp).
+// [SMTP_PENDIENTE] El transporte usa nodemailer (npm:nodemailer@^9, el
+// ejemplo oficial de Supabase: supabase/examples/edge-functions/send-email-smtp).
+// Se sustituyó deno.land/x/smtp@v0.7.0 porque usa APIs Deno 1.x obsoletas
+// (Deno.writeAll/readAll) → "Deno.writeAll is not a function" en el runtime
+// actual de Edge Functions. Gmail se conecta con implicit TLS (secure) en 465.
+//   * Pendiente real (externo): dominio + SPF/DKIM/DMARC y la contraseña
+//     de aplicación de Gmail (ver config.toml §auth.email.smtp).
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { SmtpClient } from "https://deno.land/x/smtp@v0.7.0/mod.ts";
+import nodemailer from "npm:nodemailer@^9";
+import { computeCycleVisitProgress, renderTicketEmail } from "../_shared/ticketEmail.js";
+import { resolveSmtpPort } from "../_shared/smtpConn.js";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -51,164 +54,6 @@ function json(body, status = 200) {
 function safeDetail(value) {
   const text = String(value || "");
   return text.slice(0, 500);
-}
-
-function formatMoney(amount) {
-  return new Intl.NumberFormat("es-MX", {
-    style: "currency",
-    currency: "MXN",
-    minimumFractionDigits: Number.isInteger(Number(amount)) ? 0 : 2,
-  }).format(Number(amount || 0));
-}
-
-function formatWhen(iso) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return String(iso);
-  const datePart = d.toLocaleDateString("es-MX", { day: "numeric", month: "long" });
-  const timePart = d.toLocaleTimeString("es-MX", { hour: "numeric", minute: "2-digit" });
-  return `${datePart} · ${timePart}`;
-}
-
-function buildTicketEmailHtml(visit) {
-  const isCancelled = visit.status === "cancelled";
-  const hasReward = Boolean(visit.triggered_reward_id);
-  const ref =
-    typeof visit.external_sale_id === "string" && visit.external_sale_id !== ""
-      ? visit.external_sale_id.split("_").pop()
-      : visit.id;
-  const when = formatWhen(visit.receipt_date || visit.created_at);
-  const total = formatMoney(visit.amount);
-  const items = Array.isArray(visit.items) && visit.items.length > 0 ? visit.items : null;
-
-  const itemRows = (items || [])
-    .map(
-      (item, idx) =>
-        `<tr>
-           <td style="padding:8px 24px; border-bottom:1px solid rgba(16,15,15,0.08);">
-             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-               <tr>
-                 <td style="font-family:'IBM Plex Mono',Courier,monospace; font-size:13px; color:#100F0F;">${String(item.quantity || 1)} ${String(item.name || "Artículo")}</td>
-                 <td align="right" style="font-family:'IBM Plex Mono',Courier,monospace; font-size:13px; color:#100F0F;">${formatMoney(item.total ?? item.unit_price * (item.quantity || 1))}</td>
-               </tr>
-             </table>
-           </td>
-         </tr>`
-    )
-    .join("");
-
-  const rewardRow = hasReward
-    ? `<tr>
-         <td style="padding:12px 24px; border-bottom:1px solid rgba(16,15,15,0.08);">
-           <p style="margin:0; font-family:Arial,Helvetica,sans-serif; font-size:13px; font-weight:bold; color:#8a6a26; text-align:center; background:rgba(201,162,75,0.14); border-radius:8px; padding:8px 10px;">RECOMPENSA GENERADA</p>
-         </td>
-       </tr>`
-    : "";
-
-  const row = (label, value, bold = false) =>
-    `<tr>
-       <td style="padding:9px 24px; border-bottom:1px solid rgba(16,15,15,0.08);">
-         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-           <tr>
-             <td style="font-family:'IBM Plex Mono',Courier,monospace; font-size:13px; color:rgba(16,15,15,0.62); white-space:nowrap;">${label}</td>
-             <td align="right" style="font-family:'IBM Plex Mono',Courier,monospace; font-size:13px; color:#100F0F; ${bold ? "font-weight:bold; font-size:15px;" : ""}">${value}</td>
-           </tr>
-         </table>
-       </td>
-     </tr>`;
-
-  return `<!doctype html>
-<html lang="es" xmlns="http://www.w3.org/1999/xhtml">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="X-UA-Compatible" content="IE=edge">
-<title>Tu ticket de Salmos Café</title>
-</head>
-<body style="margin:0; padding:0; background-color:#F5EEE2; -webkit-text-size-adjust:100%;">
-  <div style="display:none; max-height:0; overflow:hidden; mso-hide:all; font-size:1px; line-height:1px; color:#F5EEE2;">
-    Aquí tienes el detalle de tu visita.
-  </div>
-
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F5EEE2;">
-    <tr>
-      <td align="center" style="padding:32px 16px;">
-
-        <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px; max-width:600px; background-color:#FFFFFF; border-radius:16px; overflow:hidden;">
-
-          <tr>
-            <td align="center" style="background-color:#1F3355; padding:32px 24px;">
-              <!-- [LOGO_URL_PROVISIONAL] misma convención que las plantillas existentes de email-templates/. -->
-              <img src="https://raw.githubusercontent.com/salmoscafe/salmos-cafe-loyalty/main/email-templates/assets/wordmark-cream.png" width="180" height="58" alt="Salmos Café" style="display:block; border:0;">
-            </td>
-          </tr>
-
-          <tr>
-            <td align="center" style="padding:38px 32px 8px;">
-              <h1 style="margin:0 0 10px; font-family:Georgia,'Times New Roman',serif; font-style:italic; font-weight:normal; font-size:26px; line-height:1.25; color:#1F3355;">
-                Tu ticket de Salmos Café
-              </h1>
-              <p style="margin:0; font-family:Arial,Helvetica,sans-serif; font-size:15px; line-height:1.6; color:#100F0F;">
-                Aquí tienes el detalle de tu visita.
-              </p>
-            </td>
-          </tr>
-
-          <tr>
-            <td align="center" style="padding:24px 32px;">
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#FBF7EF; border-radius:12px; overflow:hidden; border:1px solid rgba(16,15,15,0.08);">
-
-                <tr>
-                  <td align="center" style="padding:18px 24px 6px;">
-                    <p style="margin:0; font-family:'IBM Plex Mono',Courier,monospace; font-size:14px; font-weight:bold; letter-spacing:0.08em; color:#1F3355;">SALMOS CAFÉ</p>
-                    <p style="margin:4px 0 0; font-family:Georgia,'Times New Roman',serif; font-style:italic; font-size:11px; color:#33211D;">Donde el café es un verso al paladar</p>
-                  </td>
-                </tr>
-
-                <tr>
-                  <td style="padding:12px 24px 0; text-align:center;">
-                    <p style="margin:0; font-family:'IBM Plex Mono',Courier,monospace; font-size:12px; color:#100F0F; line-height:1.6;">
-                      Ticket #${ref}<br>${when}
-                    </p>
-                  </td>
-                </tr>
-
-                <tr>
-                  <td style="padding:12px 24px 0;">
-                    <div style="border-top:1px dashed rgba(16,15,15,0.25);"></div>
-                  </td>
-                </tr>
-
-                ${itemRows}
-
-                ${row("Total", total, true)}
-
-                ${row("Estado", isCancelled ? "Compra cancelada" : "Compra registrada")}
-
-                ${rewardRow}
-
-              </table>
-            </td>
-          </tr>
-
-          <tr>
-            <td align="center" style="padding:0 32px 36px;">
-              <p style="margin:0 0 6px; font-family:Georgia,'Times New Roman',serif; font-style:italic; font-size:14px; color:#33211D;">
-                Salmos Café
-              </p>
-              <p style="margin:0; font-family:Arial,Helvetica,sans-serif; font-size:11px; color:#33211D; opacity:0.55; line-height:1.5;">
-                Gracias por tu visita: cada café suma en tu tarjeta.
-              </p>
-            </td>
-          </tr>
-
-        </table>
-
-      </td>
-    </tr>
-  </table>
-</body>
-</html>`;
 }
 
 Deno.serve(async (req) => {
@@ -273,9 +118,33 @@ Deno.serve(async (req) => {
       .maybeSingle();
     if (!visit) return json({ ok: false, code: "ticket_not_found", retriable: false }, 404);
 
+    // Progreso del ciclo (mismo dato que el ticket de la app: derive de
+    // loyalty_visits, el esquema real no guarda contador). Si no se puede
+    // calcular, el correo simplemente omite la línea "Tu tarjeta N/M".
+    let cycleVisits = null;
+    let requiredVisits = null;
+    {
+      const { data: allVisits } = await supabase
+        .from("loyalty_visits")
+        .select("id, cycle_id, status, receipt_date, visit_date, created_at")
+        .eq("customer_id", profile.id);
+      const progressMap = computeCycleVisitProgress(allVisits || []);
+      cycleVisits = progressMap.get(visit.id) ?? null;
+
+      const { data: cycles } = await supabase
+        .from("loyalty_cycles")
+        .select("id, required_visits")
+        .eq("customer_id", profile.id);
+      const cycle = (cycles || []).find((c) => c.id === visit.cycle_id);
+      requiredVisits = typeof cycle?.required_visits === "number" ? cycle.required_visits : null;
+    }
+
     // Sin SMTP no se simula el envío: se responde email_not_configured.
     const smtpHost = Deno.env.get("SMTP_HOST") || "";
-    const smtpPort = Number(Deno.env.get("SMTP_PORT") || 587);
+    // Gmail: implicit TLS en 465 (SMTP_PORT=465). Si el puerto fuera 587,
+    // nodemailer usaría STARTTLS de forma automática; la config del proyecto
+    // y los secretos remotos apuntan a 465 (secure=true).
+    const smtpPort = resolveSmtpPort(Deno.env.get("SMTP_PORT"));
     const smtpUser = Deno.env.get("SMTP_USER") || "";
     const smtpPass = Deno.env.get("SMTP_PASS") || "";
     const senderEmail = Deno.env.get("SMTP_SENDER_EMAIL") || "";
@@ -294,25 +163,41 @@ Deno.serve(async (req) => {
     }
 
     const subject = "Tu ticket de Salmos Café";
-    const content = buildTicketEmailHtml(visit);
+    const appUrl = Deno.env.get("SMTP_APP_URL") || "";
+    const content = renderTicketEmail({ visit, cycleVisits, requiredVisits, appUrl });
 
-    const client = new SmtpClient();
+    const transporter = nodemailer.createTransport({
+      host: smtpHost,
+      port: smtpPort,
+      secure: smtpPort === 465, // implicit TLS (Gmail). 587 → STARTTLS automático.
+      auth: {
+        user: smtpUser,
+        pass: smtpPass,
+      },
+    });
     try {
-      await client.connectTLS({
-        hostname: smtpHost,
-        port: smtpPort,
-        username: smtpUser,
-        password: smtpPass,
-      });
-      await client.send({
+      await transporter.sendMail({
         from: senderName ? `${senderName} <${senderEmail}>` : senderEmail,
         to: [email],
         subject,
-        content,
         html: content,
       });
-      await client.close();
+      transporter.close();
     } catch (error) {
+      // Diagnóstico temporal (seguro): en Supabase Function Logs se verá el
+      // nombre y el mensaje del error SMTP, SIN exponer credenciales, tokens
+      // ni datos personales del cliente. El mensaje se sanitiza removiendo
+      // SMTP_USER/SMTP_PASS por si el cliente SMTP los incluyera.
+      let safeMessage = error instanceof Error
+        ? error.message
+        : String(
+            error && typeof error === "object" && "message" in error ? error.message : error) || "unknown";
+      if (smtpUser) safeMessage = safeMessage.split(smtpUser).join("[REDACTED_USER]");
+      if (smtpPass) safeMessage = safeMessage.split(smtpPass).join("[REDACTED_PASS]");
+      console.error("[send-ticket] SMTP error", {
+        name: error instanceof Error ? error.name : typeof error,
+        message: safeMessage,
+      });
       // Nunca exponer credenciales ni detalles SMTP al navegador.
       return json({ ok: false, code: "email_send_failed", retriable: true }, 502);
     }

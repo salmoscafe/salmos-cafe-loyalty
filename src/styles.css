@@ -715,9 +715,9 @@ button.sc-timeline__hit--purchase:focus-visible, button.sc-timeline__hit--purcha
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 14px;
   width: 100%;
-  margin-top: 6px;
+  margin-top: 18px;
 }
 .sc-receipt-actions__btn {
   flex: 1 1 0;
