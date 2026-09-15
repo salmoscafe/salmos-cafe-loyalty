@@ -29,7 +29,7 @@ Estado verificable del repositorio en esta fecha (checkpoint documental de Git).
   autenticado + `service_role`; `body.email` dejó de ser fuente de identidad;
   la vinculación solo por teléfono queda **bloqueada hasta verificar**; los
   índices únicos normalizados previenen duplicados/ambigüedad de identidad.
-- **Tests: 155/155 pasando** (`node --test "tests/*.test.mjs"`).
+- **Tests: 203/203 pasando** (`node --test "tests/*.test.mjs"`).
 - **Build: pasa** (`npm run build`; solo el aviso preexistente de chunk Vite
   > 500 kB, no se tocó en este checkpoint).
 - **Sync de receipts Loyverse desplegado y validado**: Edge Function
@@ -174,9 +174,9 @@ Reglas implementadas en el motor SQL (migraciones `0002`/`0005`/`0007`):
 
 #### 6) Validaciones realizadas
 
-- **Tests completos: 155/155** (`npm test`) — incluyen las suites de
+- **Tests completos: 203/203** (`npm test`) — incluyen las suites de
   `receipts-sync-core`, `loyalty-engine`, `sync-claim`, `single-flight`,
-  `loyalty`, `loyverse-sync`, `auth` y `navigation`.
+  `loyalty`, `loyverse-sync`, `auth`, `navigation` y `psalms`.
 - **Build exitoso**: `npm run build` (solo el aviso preexistente de chunk
   Vite > 500 kB, ajeno al sync).
 - **Sync real exitoso** Loyverse → Supabase: **el último sync procesó
@@ -195,7 +195,7 @@ Reglas implementadas en el motor SQL (migraciones `0002`/`0005`/`0007`):
   (`loyverse_sync_state`), ventana de 30 días, idempotencia y cancelaciones.
 - Lecturas del cliente (Home y pantallas derivadas) desde Supabase real.
 - Sync de clientes Loyverse (Fase C) desplegado y validado previamente.
-- 155 tests + build verde al día de hoy.
+- 203 tests + build verde al día de hoy.
 
 **PENDIENTE:**
 - Migrar las **escrituras** del flujo Staff al motor real
@@ -277,6 +277,7 @@ Reglas implementadas en el motor SQL (migraciones `0002`/`0005`/`0007`):
 | Fase C — Loyverse Sync | ✅ | Crear/vincular/actualizar clientes sin duplicados, incl. claim atómico de concurrencia (código + tests + despliegue + QA real) |
 | Fase D — Loyalty | ~ | Motor SQL real (migraciones `0005`/`0007`) + **lecturas del Cliente reales (Home/Perfil)** + sync de receipts; pendiente: escrituras Staff sobre las RPCs |
 | Fase E — Sales / POS | ⏳ | `ManualSalesAdapter` hoy; ventas Loyverse no conectadas |
+| Fase F — Dataset de Salmos | ✅ | Dataset local de 150 pasajes RVR1960 (`bible-verses.json`), capa de acceso `psalms.js`, `TicketVerse` activo en el ticket de fidelidad; `DailyVerse` disponible pero oculto del Home por decisión de diseño |
 
 ## Roadmap
 
@@ -287,8 +288,32 @@ Reglas implementadas en el motor SQL (migraciones `0002`/`0005`/`0007`):
 - Branded email templates ✅
 - Loyalty engine ⏳ (~SQL real + lecturas; escrituras Staff pendientes)
 - Customer loyalty experience ⏳ (Home real; QR firmado pendiente)
+- Dataset de Salmos (contenido bíblico local) ✅
 - Sales / POS integration ⏳
 - Production hardening ⏳
+
+## Dataset de Salmos — contenido bíblico local
+
+La aplicación consume un dataset **local y offline** de pasajes de Salmos
+en español (RVR1960), sin depender de ninguna API, GitHub o red en runtime.
+
+- **Archivo**: `src/data/bible-verses.json` — 150 pasajes, 19 categorías,
+  textos RVR1960 completos (ver `docs/psalms-dataset.md`).
+- **Capa de acceso**: `src/lib/psalms.js` — funciones puras sobre el JSON
+  (`getDailyPassage`, `getDailyShortPassage`, `getPassagesByTag`, etc.).
+- **Ticket de fidelidad** (`TicketVerse`): un pasaje corto (≤ 160 chars,
+  ≤ 3 líneas) se renderiza automáticamente dentro de cada ticket impreso,
+  entre la sección de visitas/progreso y el código de barras. La selección
+  es determinística por fecha y nunca trunca texto.
+- **`DailyVerse`**: componente de pasaje visible en Home (con tags). El
+  componente existe y la funcionalidad está disponible, pero actualmente
+  está **oculto del Home por decisión de diseño**.
+- **Sin dependencia externa**: todo vive en el JSON local. El repositorio
+  `mrk214/bible-data-es-spa` se usó una sola vez como herramienta de
+  extracción; no forma parte del runtime.
+- **Derechos RVR1960**: Texto RVR1960 © Sociedades Bíblicas Unidas.
+
+Ver también: `tests/psalms.test.mjs` (suite de tests de la capa de acceso).
 
 ## Tech Stack
 
@@ -318,10 +343,11 @@ Ver `tests/loyalty.test.mjs`, `tests/loyverse-sync.test.mjs` y
 
 ## Tests / calidad
 
-- **155 tests pasando** (`npm test`): motor de lealtad (`loyalty`),
+- **203 tests pasando** (`npm test`): motor de lealtad (`loyalty`),
   sincronización de clientes Loyverse (`loyverse-sync`), sync de receipts
   (`receipts-sync-core`), motor SQL (`loyalty-engine`), claim atómico
-  (`sync-claim`), single-flight, flujo de auth y navegación por pathname.
+  (`sync-claim`), single-flight, flujo de auth, navegación por pathname
+  y dataset local de Salmos (`psalms`).
 - `npm run build` compila sin errores (hay un aviso **preexistente** de
   tamaño de chunk de Vite > 500 kB, no introducido por el sync).
 - `npm audit` reporta **0 vulnerabilidades**.
@@ -575,6 +601,9 @@ src/
   data/mockDatabase.js     "backend falso": customers, cards, branches,
                             loyalty_cycles, sales, rewards, staff_profiles,
                             audit_logs
+  data/bible-verses.json   dataset local de 150 pasajes RVR1960 (Salmos),
+                            19 tags, ~28k chars; fuente única de contenido
+                            bíblico (sin API en runtime)
   services/                motor de fidelización real; única puerta de
                             entrada a los datos; cada método es async
     index.js               BARREL ÚNICO — las pantallas importan SOLO desde aquí
@@ -597,7 +626,9 @@ src/
     layout/                BottomNav, QrModal, QrCode — estructura de pantalla
     auth/                  piezas del flujo AuthScreen (login/registro/
                            recuperación por OTP/provisioning)
-    loyalty/               StampTrack, SyncBanner — visuales de fidelización
+    loyalty/               StampTrack, SyncBanner, DailyVerse
+                           (DailyVerse disponible; oculto del Home)
+    activity/              TicketVerse (versículo en ticket de fidelidad)
   screens/client/          Home, Recompensas, Actividad, Perfil, Configuración
   screens/staff/           Home, Escanear, Cliente encontrado,
                             Registrar venta (con sucursal), Confirmación, Actividad
@@ -608,6 +639,9 @@ src/
     phone.js               teléfonos E.164 +52 (normalización, validación)
     delay.js               util de pausa simulada
     navigation.js          resolución de experiencia por pathname (/ /Staff /Admin)
+    psalms.js              funciones puras sobre bible-verses.json
+                           (getDailyPassage, getDailyShortPassage,
+                           getPassagesByTag, getAllTags, etc.)
   App.jsx                  orquestador raíz + resolución de experiencia por URL
   styles.css               identidad visual completa (paleta real del logo)
 tests/loyalty.test.mjs              suite del motor de fidelización (node --test)
@@ -618,6 +652,9 @@ tests/sync-claim.test.mjs           claim atómico de concurrencia (lease, token
 tests/single-flight.test.mjs        guard single-flight del frontend
 tests/auth.test.mjs                 suite del flujo de auth (contraseña + recuperación OTP)
 tests/navigation.test.mjs           suite de navegación por pathname (sin router)
+tests/psalms.test.mjs                suite del dataset local de Salmos (getPassageById,
+                                     getPassagesByTag, getDailyPassage,
+                                     getDailyShortPassage, inmutabilidad)
 
 email-templates/            fuente única de las 5 plantillas de email branded
   confirm-signup.html       type key `confirmation`
@@ -700,6 +737,7 @@ branded en producción: publicar el dominio, hospedar
 
 ## Documentation
 
+- `docs/psalms-dataset.md` — dataset de Salmos: proceso de construcción, validación (150 pasajes, 1,406/1,406 versículos), integración en la aplicación (DailyVerse + TicketVerse en ticket), selección de pasajes cortos.
 - `docs/CURRENT_STATUS.md` — estado actual verificable del proyecto.
 - `docs/AUTH_AND_LOYVERSE_FLOW.md` — flujo de auth y sincronización con Loyverse.
 - `docs/AUTH_AUDIT.md` — auditoría AUTH-1/AUTH-2 (SMTP, plantillas de email, Google OAuth) y actualizaciones recientes.

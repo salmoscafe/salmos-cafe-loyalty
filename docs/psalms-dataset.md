@@ -1,9 +1,9 @@
 # Dataset de Salmos — Checkpoint
 
-Estado del dataset local de pasajes de Salmos que la aplicación consumirá
-(todavía **sin integración** con UI o lógica). Este documento describe el
-proceso de construcción y el estado verificado del archivo, **no** duplica el
-contenido de `src/data/bible-verses.json`.
+Estado del dataset local de pasajes de Salmos que la aplicación consume
+integrado en dos contextos de la UI (**ver sección 17**). Este documento
+describe el proceso de construcción, el estado del archivo y la integración
+actual. **No** duplica el contenido de `src/data/bible-verses.json`.
 
 Fecha del checkpoint: 2026-09-15.
 
@@ -276,20 +276,123 @@ chunk > 500 kB (`assets/index-*.js`), ajeno a esta etapa.
 - `src/data/bible-verses.json` es autocontenido: referencia + numeración +
   tags + texto en plano.
 
-## 16. Estado actual y siguiente etapa
+## 16. Estado actual
 
 **Estado (cerrado en este checkpoint):**
 
 - Dataset de Salmos construido y validado: 150 pasajes, 19 tags, textos
   RVR1960 completos, cobertura 1,406/1,406, sin dependencias externas.
 - Documentación de esta etapa: este documento.
+- Integración en la UI verificada (ver sección 17).
 - Sin commit ni push aún de esta documentación/dataset (ver sección Git).
 
-**Siguiente etapa (NO implementada todavía):**
+**Funcionalidad implementada:**
 
-- Integrar `src/data/bible-verses.json` con la UI y/o lógica de la
-  aplicación (selección de pasajes por tag, visualización del texto, etc.).
-- Cualquier integración deberá consumir el archivo local; no se debe
-  introducir una fuente remota de textos bíblicos.
-- Respetar y conservar el aviso de derechos de RVR1960 citado en la
-  sección 7 en cualquier presentación del texto al usuario.
+- `DailyVerse` en Home del cliente: pasaje del día con tags. El componente
+  existe y la funcionalidad sigue disponible, pero actualmente está
+  **oculto de la página principal por decisión de diseño** (ver sección
+  17.2).
+- Pasaje corto dentro del ticket de fidelidad (`TicketVerse`): activo,
+  selección restringida a textos ≤ 160 caracteres y ≤ 3 líneas (ver
+  sección 17.3).
+
+## 17. Integración en la aplicación
+
+### 17.1 Visión general
+
+El dataset se consume actualmente en **dos contextos** de la aplicación,
+ambos usando la misma fuente local y la misma capa de acceso:
+
+| Contexto | Componente | Ubicación | Selección | Estado |
+|---|---|---|---|---|
+| **Home** (cliente) | `DailyVerse.jsx` | `src/components/loyalty/` | Todos los 150 pasajes, determinístico por fecha | Disponible, actualmente oculto del Home |
+| **Ticket de fidelidad** | `TicketVerse.jsx` | `src/components/activity/` | Solo pasajes ≤ 160 caracteres y ≤ 3 líneas | Activo |
+
+- **Fuente de datos:** `src/data/bible-verses.json` (única; no se duplica).
+- **Capa de acceso:** `src/lib/psalms.js` (funciones puras sobre el JSON;
+  exporta `getDailyPassage`, `getDailyShortPassage` y utilidades de
+  filtrado).
+- **Sin API bíblica externa:** no hay `fetch` a GitHub ni a ninguna URL
+  para contenido bíblico. Todo es local y offline.
+
+### 17.2 Home — DailyVerse
+
+El componente `DailyVerse` sigue existiendo en
+`src/components/loyalty/DailyVerse.jsx` y su funcionalidad permanece
+disponible: importa `getDailyPassage()` desde `src/lib/psalms.js` y
+renderiza el pasaje determinístico del día con tags.
+
+De acuerdo con la decisión de diseño actual, `DailyVerse` está **oculto
+de la página principal** (`Home`): `src/screens/client/Home.jsx` ya no lo
+importa ni lo renderiza. El componente y su lógica no fueron eliminados;
+solo se dejó de usar en el Home. Esto no afecta al `TicketVerse`, que
+permanece activo dentro del ticket.
+
+### 17.3 Ticket de fidelidad — pasaje corto (TicketVerse)
+
+Ubicación dentro del ticket (orden exacto):
+`visitas → versículo → código de barras`
+
+El componente `TicketVerse.jsx` vive en `src/components/activity/` y se
+renderiza dentro de `ReceiptPrinter.jsx` (`src/components/activity/`),
+entre la sección `.sc-receipt__loyalty` (visitas) y el componente
+`Code128Barcode`. No se modifica la lógica de visitas, fidelidad ni del
+código de barras.
+
+Estilo: bloque compacto centrado con borde dashed superior (mismo
+lenguaje visual que los divisores del ticket), texto en 10px con
+`white-space: pre-line` y referencia en 9px. Tags y metadatos NO se
+muestran en el ticket.
+
+**Límites para selección del ticket:**
+
+| Constante | Valor | Significado |
+|---|---|---|
+| `MAX_TICKET_CHARS` | 160 | Longitud máxima del texto (sin truncar) |
+| `MAX_TICKET_LINES` | 3 | Máximo de líneas separadas por `\n` |
+
+`getDailyShortPassage()` filtra el dataset completo según estos límites,
+selecciona por la misma semilla de fecha y nunca trunca texto — solo
+descarta pasajes que no caben. Con el dataset actual, hay ~49 pasajes
+candidatos que cumplen ambas restricciones.
+
+### 17.4 Funciones de `src/lib/psalms.js`
+
+Funciones existentes (sin cambios):
+
+| Función | Propósito |
+|---|---|
+| `getAllPassages` | Catálogo completo (150) |
+| `getPassageById` | Búsqueda por ID |
+| `getPassagesByTag` | Filtrado por tag |
+| `getPassagesByChapter` | Filtrado por capítulo |
+| `getAllTags` | Lista de 19 tags únicos |
+| `getDailyPassage` | Pasaje determinístico (Home) |
+
+Funciones nuevas (esta etapa):
+
+| Función | Propósito |
+|---|---|
+| `getDailyShortPassage` | Pasaje corto determinístico (ticket); filtra ≤ 160 caracteres y ≤ 3 líneas |
+| `MAX_TICKET_CHARS` | Límite de caracteres para el ticket (exportado para tests) |
+| `MAX_TICKET_LINES` | Límite de líneas para el ticket (exportado para tests) |
+
+### 17.5 Sin dependencia externa
+
+- `src/data/bible-verses.json` es autocontenido (referencia + numeración +
+  tags + texto en plano).
+- No existe `fetch` a GitHub, HTTP ni API bíblica en ningún punto de la
+  aplicación para contenido de Salmos.
+- El repositorio externo `mrk214/bible-data-es-spa` fue usado **una sola
+  vez** para extraer los textos; no es parte del runtime.
+- `src/lib/psalms.js` importa el JSON con `with { type: "json" }` (Vite
+  y Node 22); no requiere configuración adicional.
+
+### 17.6 Derechos RVR1960
+
+La presentación del texto bíblico RVR1960 debe incluir la atribución:
+> Texto: Reina-Valera 1960 © Sociedades Bíblicas Unidas
+
+El componente `DailyVerse` muestra "RVR1960" como label de la fuente.
+El ticket incluye la referencia (p. ej. "Salmos 27:1") con el contenido
+del texto original sin truncar.
