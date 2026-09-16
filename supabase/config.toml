@@ -453,6 +453,14 @@ verify_jwt = false
 [functions.send-ticket]
 verify_jwt = true
 
+# Función admin-employees (CHECKPOINT 2: ADMIN → EMPLEADOS).
+# verify_jwt = true: exige sesión GoTrue. La función revalida el rol
+# 'admin' + active en public.profiles server-side (service_role) y crea
+# cuentas Auth con la Admin API. SUPABASE_SERVICE_ROLE_KEY vive solo
+# aquí, jamás en src/ ni en el bundle.
+[functions.admin-employees]
+verify_jwt = true
+
 [analytics]
 enabled = true
 port = 54327

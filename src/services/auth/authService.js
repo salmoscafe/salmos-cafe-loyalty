@@ -54,6 +54,9 @@ export const signInWithGoogle = pick("signInWithGoogle");
 export const devSetForceTransientError = mock.devSetForceTransientError;
 export const devSetGoogleMode = mock.devSetGoogleMode;
 
+// --- Perfil de rol (profiles) -------------------------------------------
+export const getProfile = pick("getProfile");
+
 // --- Staff (siempre mock en esta fase) -----------------------------------
 export const getStaffSession = mock.getStaffSession;
 export const signInStaff = mock.signInStaff;

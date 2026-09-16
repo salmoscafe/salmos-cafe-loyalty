@@ -34,6 +34,7 @@ import {
   parseBearer,
   parseJsonBody,
   requireVerifiedStaff,
+  resolveActorRole,
   validateOperation,
   validatePayload,
 } from "../supabase/functions/_shared/loyaltyEngineCore.js";
@@ -255,51 +256,113 @@ test("validatePayload rechaza cuerpo no-objeto (JSON array/null/string)", () => 
 });
 
 // ---------------------------------------------------------------
-// Política de actores — sin identidad Staff, todo autenticado es customer
+// Política de actores — el rol se resuelve server-side desde
+// public.profiles (CHECKPOINT 1). `profile` = { id, role, active }.
 // ---------------------------------------------------------------
+const PROFILE_CUSTOMER = { id: UUID_A, role: "customer", active: true };
+const PROFILE_STAFF = { id: UUID_A, role: "staff", active: true };
+const PROFILE_ADMIN = { id: UUID_A, role: "admin", active: true };
+const PROFILE_STAFF_INACTIVE = { id: UUID_A, role: "staff", active: false };
+
 test("customer JWT no puede registrar su propia visita (SELF_VISIT_NOT_ALLOWED)", () => {
-  const res = decideActorPolicy({ operation: "visit", user: customerUser() });
+  const res = decideActorPolicy({ operation: "visit", user: customerUser(), profile: PROFILE_CUSTOMER });
   assert.equal(res.allowed, false);
   assert.equal(res.error.code, "SELF_VISIT_NOT_ALLOWED");
   assert.equal(res.error.status, 403);
 });
 
 test("customer JWT no puede cancelar ni redimir (staff-only)", () => {
-  const cancel = decideActorPolicy({ operation: "cancel", user: customerUser() });
+  const cancel = decideActorPolicy({ operation: "cancel", user: customerUser(), profile: PROFILE_CUSTOMER });
   assert.equal(cancel.allowed, false);
   assert.equal(cancel.error.code, "CUSTOMER_CANCEL_NOT_ALLOWED");
 
-  const redeem = decideActorPolicy({ operation: "redeem", user: customerUser() });
+  const redeem = decideActorPolicy({ operation: "redeem", user: customerUser(), profile: PROFILE_CUSTOMER });
   assert.equal(redeem.allowed, false);
   assert.equal(redeem.error.code, "CUSTOMER_REDEEM_NOT_ALLOWED");
 });
 
 test("sin sesión -> UNAUTHORIZED", () => {
   for (const noUser of [undefined, null, {}]) {
-    const res = decideActorPolicy({ operation: "visit", user: noUser });
+    const res = decideActorPolicy({ operation: "visit", user: noUser, profile: PROFILE_STAFF });
     assert.equal(res.allowed, false);
     assert.equal(res.error.code, "UNAUTHORIZED");
     assert.equal(res.error.status, 401);
   }
 });
 
-test("NUNCA se concede staff por payload: role/fake/staff no existe en el core", () => {
-  // El core no lee actorRole del body (lo rechaza en validación) y la
-  // política deriva el rol SIEMPRE como customer. Un payload que intente
-  // suplantar staff es denegado igual.
+test("staff activo con perfil válido es reconocido por loyalty-engine", () => {
+  for (const op of ["visit", "cancel", "redeem"]) {
+    const res = decideActorPolicy({ operation: op, user: customerUser(), profile: PROFILE_STAFF });
+    assert.equal(res.allowed, true, op);
+    assert.deepEqual(res.actor, { actorId: PROFILE_STAFF.id, actorRole: "staff" });
+  }
+});
+
+test("admin activo con perfil válido es reconocido por loyalty-engine", () => {
+  const res = decideActorPolicy({ operation: "redeem", user: customerUser(), profile: PROFILE_ADMIN });
+  assert.equal(res.allowed, true);
+  assert.deepEqual(res.actor, { actorId: PROFILE_ADMIN.id, actorRole: "admin" });
+});
+
+test("staff inactivo es rechazado para operaciones protegidas", () => {
+  const res = decideActorPolicy({ operation: "visit", user: customerUser(), profile: PROFILE_STAFF_INACTIVE });
+  assert.equal(res.allowed, false);
+  assert.equal(res.error.code, "PROFILE_NOT_FOUND");
+  assert.equal(res.error.status, 403);
+});
+
+test("usuario autenticado SIN perfil no es tratado como staff/admin", () => {
+  const res = decideActorPolicy({ operation: "visit", user: customerUser(), profile: null });
+  assert.equal(res.allowed, false);
+  assert.equal(res.error.code, "PROFILE_NOT_FOUND");
+});
+
+test("NUNCA se concede staff por payload: el rol lo decide profiles server-side", () => {
+  // Aunque el objeto user intente suplantar staff (actorRole, staffToken
+  // en el JWT/metadata), la política decide con el perfil server-side
+  // (customer) → SELF_VISIT_NOT_ALLOWED.
   const res = decideActorPolicy({
     operation: "visit",
     user: customerUser({ actorRole: "staff", staffToken: "secreto" }),
+    profile: PROFILE_CUSTOMER,
   });
   assert.equal(res.allowed, false);
   assert.equal(res.error.code, "SELF_VISIT_NOT_ALLOWED");
 });
 
-test("requireVerifiedStaff queda denegado hasta que exista auth staff real", () => {
-  const res = requireVerifiedStaff();
+test("user_metadata/app_metadata NO pueden reemplazar el rol de profiles", () => {
+  const res = decideActorPolicy({
+    operation: "redeem",
+    user: customerUser({ user_metadata: { role: "staff" }, app_metadata: { role: "admin" } }),
+    profile: PROFILE_CUSTOMER,
+  });
   assert.equal(res.allowed, false);
-  assert.equal(res.error.code, "STAFF_AUTH_REQUIRED");
-  assert.equal(res.error.status, 403);
+  assert.equal(res.error.code, "CUSTOMER_REDEEM_NOT_ALLOWED");
+});
+
+test("requireVerifiedStaff: staff/admin con perfil activo pasan; el resto queda denegado", () => {
+  const staff = requireVerifiedStaff(PROFILE_STAFF);
+  assert.equal(staff.allowed, true);
+  assert.equal(staff.actor.actorRole, "staff");
+
+  const admin = requireVerifiedStaff(PROFILE_ADMIN);
+  assert.equal(admin.allowed, true);
+
+  for (const bad of [null, PROFILE_CUSTOMER, PROFILE_STAFF_INACTIVE, { id: UUID_A, role: "inventado", active: true }]) {
+    const res = requireVerifiedStaff(bad);
+    assert.equal(res.allowed, false);
+    assert.equal(res.error.code, "STAFF_AUTH_REQUIRED");
+    assert.equal(res.error.status, 403);
+  }
+});
+
+test("resolveActorRole deriva el rol solo desde un perfil existente y activo", () => {
+  assert.equal(resolveActorRole(PROFILE_CUSTOMER), "customer");
+  assert.equal(resolveActorRole(PROFILE_STAFF), "staff");
+  assert.equal(resolveActorRole(PROFILE_ADMIN), "admin");
+  assert.equal(resolveActorRole(PROFILE_STAFF_INACTIVE), null);
+  assert.equal(resolveActorRole(null), null);
+  assert.equal(resolveActorRole({ id: UUID_A, role: "hacker", active: true }), null);
 });
 
 // ---------------------------------------------------------------

@@ -12,6 +12,7 @@ import { QrModal } from "./components/layout/QrModal.jsx";
 import { Spinner } from "./components/common/ui.jsx";
 
 import { AuthScreen } from "./components/auth/AuthScreen.jsx";
+import { RoleLoginScreen } from "./components/auth/RoleLoginScreen.jsx";
 import { HomeScreen } from "./screens/client/Home.jsx";
 import { RewardsScreen } from "./screens/client/Rewards.jsx";
 import { ActivityScreen } from "./screens/client/Activity.jsx";
@@ -28,6 +29,7 @@ import { StaffActivityScreen } from "./screens/staff/StaffActivity.jsx";
 
 import { AdminDashboard } from "./screens/admin/Dashboard.jsx";
 import { AdminCustomers } from "./screens/admin/Customers.jsx";
+import { StaffManagement } from "./screens/admin/StaffManagement.jsx";
 import { ComingSoon } from "./screens/admin/ComingSoon.jsx";
 
 /* =========================================================
@@ -200,11 +202,22 @@ function ClientApp() {
 function StaffApp() {
   const [staffSession, setStaffSession] = useState(undefined);
   const [screen, setScreen] = useState("home");
-  const [found, setFound] = useState(null); // { customer, card, cycle }
+  const [found, setFound] = useState(null); // resultado del lookup (customer/cycle/progress/reward; +card en demo)
   const [saleResult, setSaleResult] = useState(null);
 
   useEffect(() => {
-    authService.getStaffSession().then((s) => setStaffSession(s));
+    let cancelled = false;
+    authService.getProfile().then((profile) => {
+      if (cancelled) return;
+      if (profile && profile.active && profile.role === "staff") {
+        setStaffSession({ staff: { id: profile.id, name: profile.name || "Equipo", role: profile.role } });
+      } else {
+        setStaffSession(null);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (staffSession === undefined) {
@@ -218,9 +231,7 @@ function StaffApp() {
   if (staffSession === null) {
     return (
       <div className="sc-phone">
-        <div className="sc-main">
-          <StaffLoginScreen onSignedIn={() => authService.getStaffSession().then(setStaffSession)} />
-        </div>
+        <div className="sc-main"><StaffLoginScreen onSignedIn={(identity) => setStaffSession({ staff: identity })} /></div>
       </div>
     );
   }
@@ -228,7 +239,11 @@ function StaffApp() {
   const { staff } = staffSession;
 
   async function handleSignOut() {
-    await authService.signOutStaff();
+    if (authService.isDemoMode) {
+      await authService.signOutStaff();
+    } else {
+      await authService.signOutClient();
+    }
     setStaffSession(null);
     setScreen("home");
     setFound(null);
@@ -272,7 +287,7 @@ function StaffApp() {
           <ScannerScreen
             onBack={() => setScreen("home")}
             onFound={(res) => {
-              setFound({ customer: res.customer, card: res.card, cycle: res.cycle });
+              setFound(res);
               setScreen("found");
             }}
           />
@@ -280,9 +295,7 @@ function StaffApp() {
 
         {screen === "found" && found && (
           <CustomerFoundScreen
-            customer={found.customer}
-            card={found.card}
-            cycle={found.cycle}
+            result={found}
             staff={staff}
             onBack={() => setScreen("scanner")}
             onRegisterSale={() => setScreen("sale")}
@@ -323,15 +336,55 @@ function StaffApp() {
 /* --------------------------- Admin --------------------------- */
 
 function AdminApp() {
+  const [adminSession, setAdminSession] = useState(undefined);
   const [tab, setTab] = useState("dashboard");
   const TABS = [
     { key: "dashboard", label: "Dashboard" },
     { key: "customers", label: "Clientes" },
     { key: "sales", label: "Ventas" },
     { key: "rewards", label: "Recompensas" },
-    { key: "staff", label: "Staff" },
+    { key: "staff", label: "Empleados" },
     { key: "settings", label: "Configuración" },
   ];
+
+  useEffect(() => {
+    let cancelled = false;
+    authService.getProfile().then((profile) => {
+      if (cancelled) return;
+      if (profile && profile.active && profile.role === "admin") {
+        setAdminSession({ admin: { id: profile.id, name: profile.name || "Admin", role: profile.role } });
+      } else {
+        setAdminSession(null);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (adminSession === undefined) {
+    return (
+      <div className="sc-phone">
+        <div className="sc-main"><Spinner label="Cargando…" /></div>
+      </div>
+    );
+  }
+
+  if (adminSession === null) {
+    return (
+      <div className="sc-phone">
+        <div className="sc-main">
+          <RoleLoginScreen
+            requiredRole="admin"
+            title="Acceso administrativo"
+            subtitle="Ingresa tus datos de administración."
+            demoHint="Demo: PIN 9999 (Diana · Admin)"
+            onSignedIn={(identity) => setAdminSession({ admin: identity })}
+          />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="sc-admin-shell">
@@ -356,9 +409,19 @@ function AdminApp() {
         {tab === "customers" && <AdminCustomers />}
         {tab === "sales" && <ComingSoon title="Ventas" />}
         {tab === "rewards" && <ComingSoon title="Recompensas" />}
-        {tab === "staff" && <ComingSoon title="Staff" />}
+        {tab === "staff" && <StaffManagement />}
         {tab === "settings" && <ComingSoon title="Configuración" />}
       </main>
+      <button
+        className="sc-admin-signout"
+        onClick={async () => {
+          if (authService.isDemoMode) await authService.signOutStaff();
+          else await authService.signOutClient();
+          setAdminSession(null);
+        }}
+      >
+        Cerrar sesión
+      </button>
     </div>
   );
 }

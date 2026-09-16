@@ -395,4 +395,26 @@ export async function signInWithGoogle() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Perfil de rol (profiles). Lee la tabla profiles vía RLS: cada usuario
+// autenticado solo puede leer su propio perfil (auth.uid() = id).
+// ---------------------------------------------------------------------------
+
+export async function getProfile() {
+  if (!supabaseClient) return null;
+  const {
+    data: { session },
+  } = await supabaseClient.auth.getSession();
+  if (!session?.user) return null;
+
+  const { data, error } = await supabaseClient
+    .from("profiles")
+    .select("id, role, name, active")
+    .eq("id", session.user.id)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return { id: data.id, role: data.role, name: data.name, active: data.active };
+}
+
 // -- Staff no vive aquí: sigue en authService mock (facade). --------

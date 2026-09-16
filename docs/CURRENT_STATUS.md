@@ -11,6 +11,204 @@ documentación.
 
 ---
 
+## Checkpoint — CP3.3-A Scheduler del Loyverse Receipts Sync (GitHub Actions)
+
+**Fecha:** 16 de septiembre de 2026.
+
+**Objetivo:** lograr la ejecución automática de la Edge `loyverse-receipts-sync`
+(único bloqueador productivo del audit CP3.3) cada 5 minutos, sin tocar la
+lógica de la función, RPCs, migraciones, loyalty rules, QR, Claim/OTP/Redeem,
+`loyverse-customers` ni `loyalty-engine`.
+
+- **Audit CP3.3 (base):** VEREDICTO "1 — listo para scheduler/deploy". El sync
+  es funcional; no necesita cambios de código. Scheduler era lo único faltante.
+- **Proveedor elegido — GitHub Actions** (no Vercel Cron, no pg_cron):
+  - El repo `salmoscafe/salmos-cafe-loyalty` es **público** → minutos
+    ilimitados en el plan estándar gratis de Actions (límites solo para
+    repos privados).
+  - Vercel Cron en Hobby **mínimo 1 vez por día** (no cumple la cadencia de la
+    regla de negocio $50/1-por-día, que el sync ya aplica) y no hay hosting
+    Vercel en el repo.
+  - GitHub Actions soporta `schedule` con cron por minuto; se usa `*/5 * * * *`
+    (UTC) acorde al imperativo de frecuencia del checkpoint.
+- **Workflow** `.github/workflows/loyverse-receipts-sync.yml`:
+  - `on.schedule` `*/5 * * * *` + `on.workflow_dispatch` (prueba manual).
+  - `concurrency` group `loyverse-receipts-sync` + `cancel-in-progress: true`
+    (un run por vez; seguro porque la Edge ya tiene claim atómico con lease).
+  - `permissions: contents: read` (solo `actions/checkout@v4`).
+  - Step único: `Invoke-RestMethod` (PowerShell Core) POST a
+    `vars.SYNC_URL` con header `x-sync-secret: secrets.SYNC_CRON_SECRET` y body
+    `{}` (`timeout-minutes: 10`; `exit 1` con status HTTP si falla).
+  - **No contiene** `SUPABASE_SERVICE_ROLE_KEY` ni ningún valor de secreto.
+- **Configuración remota realizada y verificada:** repository secret
+  `SYNC_CRON_SECRET` y repository variable `SYNC_URL` configurados en GitHub
+  Actions; el workflow corre **automáticamente cada 5 minutos** (schedule) y
+  también manualmente (`workflow_dispatch`). La autenticación `x-sync-secret`
+  contra la Edge funcionó correctamente.
+- **Ejecución real verificada (QA 2026-09-16):** el workflow llamó a
+  `loyverse-receipts-sync`; la Edge respondió `Sync OK` y procesó **12
+  receipts** (`pages: 1`, `registered: 0`, `no_customer: 12`). Los 12 recibos
+  (del 1-0999 al 1-1010) tenían `customer_id: null` en la API de Loyverse.
+- **`no_customer` es una condición operacional, no un fallo del sync:** esas
+  ventas se cobraron **sin asignar cliente en el POS de Loyverse**, por eso el
+  receipt no trae `customer_id`. La arquitectura es intencional: **Salmos NO
+  asigna clientes en Loyverse**; el cliente debe asignarse desde el POS.
+  Contra prueba de control: el receipt histórico `1-0759` sí trae
+  `customer_id` (`f1f60b21-…`, tienda Salmos, 105 MXN) y su visita se registró.
+- **CP3.3-A: COMPLETO.** Validaciones finales: 359/359 tests pass, `npm run
+  build` exitoso (solo el aviso preexistente de chunk Vite > 500 kB), `npm
+  audit` 0.
+- **Pendiente (únicamente la prueba operativa final):** realizar una venta
+  ≥ $50 MXN asignando **explícitamente un cliente** durante el checkout en
+  Loyverse; confirmar vía API que el receipt trae `customer_id`; esperar o
+  ejecutar el sync (≤ 5 min); comprobar que el cliente es identificado y que
+  la visita aparece en Supabase. No modificar la lógica de sync hasta que esa
+  prueba revele un error adicional.
+
+---
+
+## Nota — `supabase secrets list` NO expone valores (corrige nota previa)
+
+En la auditoría CP3.3 se anotó que `supabase secrets list` (CLI v2.116.0)
+habría impreso los **valores** de los secrets en texto plano. **Verificado en
+CP3.3-A que es incorrecto:** la salida en v2.116.0 devuelve los valores
+**encriptados/hasheados** (64 caracteres hex), nunca el valor real — p. ej.,
+`SMTP_PORT` aparece como `ad3b8537…` y no como un número de puerto, y
+`SUPABASE_URL` como un hash y no como la URL real. Por lo tanto **no hubo
+fuga de secrets por el terminal**. Se mantiene la recomendación operativa de
+no imprimir ni compartir la salida cruda de `supabase secrets list`
+(precaución estándar), pero sin tratarla como incidente.
+
+---
+
+## Checkpoint — CP3.2.1 Ajuste de UI del Staff según arquitectura real
+
+**Fecha:** 16 de septiembre de 2026.
+
+**Objetivo:** corregir la *presentación* (no la lógica) para que quede clara la
+separación entre compra y recompensa, tras el audit READ-ONLY que confirmó que
+la compra real NO depende del Scanner de Salmos pero la UI lo sugería.
+
+- **Compra normal (intacta en arquitectura):** cliente llega → Staff
+  identifica/asigna directo en el POS de Loyverse → ticket → productos → pago
+  → receipt → `loyverse-receipts-sync` → Salmos procesa la visita. **Salmos
+  NO escanea al cliente en este flujo.**
+- **Recompensa:** cliente muestra su QR → Staff valida en Salmos (Claim/OTP/
+  Redeem en un checkpoint posterior; aquí NO se implementaron).
+- **`StaffHome.jsx`**: se eliminó el tile "Asignar cliente al ticket" (no debe
+  existir una acción en Salmos que sugiera asignar clientes al ticket). El
+  tile primario se renombró de "Escanear cliente" → **"Validar recompensa"**.
+  Se agregó el panel: *"Las ventas se registran directamente en Loyverse"* +
+  *"Salmos registra tu visita automáticamente después de la compra"*.
+- **`CustomerFound.jsx`**: se reencuadró como **pantalla de validación de
+  cliente/recompensa** (mantiene cliente, progreso, recompensa y
+  `loyverse_mapped`); se quitó el hand-off de cobro al POS (que la hacía ver
+  como paso previo a una compra) y se reemplazó por una nota de validación que
+  apunta al futuro Claim/OTP/Redeem.
+- **`Scanner.jsx`**: **intacto** (base del futuro flujo de validación; no se
+  cambió el QR ni el lookup).
+- **`App.jsx`**: sin cambios funcionales (navegación home → scanner → found ya
+  era correcta en real; RegisterSale solo se alcanza en demo). No existe ruta
+  real Staff → Scanner → RegisterSale.
+- **Tests**: nuevo `tests/staff-ui-flow.test.mjs` (ausencia de la acción
+  eliminada, etiqueta "Validar recompensa", nota Loyverse, gating `isDemo` de
+  "Registrar compra", Scanner sin `registerSale`, textos sin instrucciones de
+  cobro/ticket). **N total pass** (ver validación final).
+- **Sin commit y sin push.** Intacto: QR / `QrModal.jsx` / `QrCode.jsx` /
+  `loyverse-receipts-sync` / `loyverse-customers` / `redeem_reward` /
+  migraciones / loyalty engine / reglas de lealtad / scheduler / OTP.
+
+---
+
+## Checkpoint — CP3.2 Flujo operativo Staff ↔ Loyverse (hand-off al POS)
+
+**Fecha:** 16 de septiembre de 2026.
+
+**Objetivo:** dejar clara la responsabilidad de cada sistema en una venta con
+lealtad: Salmos identifica al cliente por QR y **el cobro se hace solo en el
+POS de Loyverse** (Salmos no crea tickets, productos ni cobros). El receipt
+de Loyverse es la venta canónica que `loyverse-receipts-sync` convierte en
+`loyalty_visits`. Sin venta manual en producción, sin Claim/OTP/redeem, sin
+segundo POS, sin migraciones.
+
+- **Flujo final Staff ↔ Loyverse (CP3.2):**
+  1. El cliente muestra su QR (`customer_code`).
+  2. Staff escanea en la app Salmos → lookup real en la Edge `loyalty-engine`.
+  3. Salmos muestra cliente + progreso + recompensa y un **indicador
+     `loyverse_mapped`** (booleano derivado en servidor; **jamás el id real**).
+  4. Staff abre el ticket en el POS de Loyverse y **asigna al cliente
+     existente** buscándolo por nombre/teléfono/correo (el POS no busca por
+     `customer_code`), agrega productos y cobra normalmente.
+  5. Loyverse genera el receipt → `loyverse-receipts-sync` lo procesa en
+     Supabase (idempotente por `external_sale_id`, fecha de negocio en
+     America/Tijuana, ignora receipts sin `customer_id` o sin mapeo
+     `unmapped_customer`, mínimo `$50`).
+  6. La visita se registra con las reglas actuales (7 visitas, máx 1/día).
+
+- **Cómo se evita duplicar visitas / doble registro:** en modo real
+  `CustomerFound` no muestra ni "Registrar compra" ni "Canjear" (existen solo
+  en demo); la única vía de alta de visita es el sync del receipt de Loyverse,
+  que es idempotente. `RegisterSale` queda como demo/contingencia.
+- **Core** (`supabase/functions/_shared/loyaltyEngineCore.js`):
+  `buildLookupResult` deriva `loyverse_mapped: Boolean(customer.loyverse_customer_id)`
+  y **strippea** la columna del response (nunca expone el id real). La Edge
+  (`serveLookup`) añade `loyverse_customer_id` al SELECT **solo** para derivar
+  el booleano.
+- **Frontend**: `CustomerFound.jsx` pinta el indicador de vínculo (verde
+  "Cliente vinculado a Loyverse" / ámbar "Cliente no vinculado…") + tarjeta de
+  hand-off al POS (solo modo real; la demo queda intacta). `StaffHome.jsx`
+  renombra el tile "Registrar venta" → "Asignar cliente al ticket" (sigue
+  abriendo el escáner; no crea un segundo POS).
+- **Tests**: 4 nuevos en `tests/loyalty-engine-lookup.test.mjs` (mapped
+  true/false/null + no-fuga del id real) y actualizados (claves `customer`
+  ahora incluyen `loyverse_mapped`; el test anti-fuga verifica clave y valor).
+  **351/351 pass** (347 previos + 4 nuevos); `npm run build` OK (aviso de
+  chunk preexistente); `npm audit` 0; `git diff --check` limpio (solo avisos
+  LF/CRLF).
+- **Sin commit y sin push** (igual que los checkpoints anteriores). CP3.3-A
+  (scheduler de `loyverse-receipts-sync`): ver checkpoint correspondiente
+  abajo; luego CP3.4 Staff Activity real; después el flujo de redención (Claim + OTP +
+  `redeem_reward` + descuento en Loyverse).
+
+---
+
+## Checkpoint — CP3.1 Customer Lookup real (Staff → scanner QR → Supabase)
+
+**Fecha:** 16 de septiembre de 2026.
+
+**Objetivo:** Staff escanea `customer_code` del QR → Edge Function
+`loyalty-engine` (operación `lookup`, server-side con `service_role`) →
+cliente real + ciclo activo + progreso + recompensa. **Sin abrir RLS, sin
+mock en modo real, sin migraciones nuevas, sin tocar QR/ventas/redeem.**
+
+- **Edge `loyalty-engine`** (`supabase/functions/loyalty-engine/index.ts`):
+  nueva rama `lookup` (lectura pura, sin RPC, sin escribir tablas). Usa el
+  mismo pipeline de CP1 (JWT `auth.getUser` → rol desde `public.profiles` con
+  `service_role`) + `decideLookupPolicy` (solo staff/admin activo; customer,
+  inactivo, sin perfil y sin sesión quedan denegados con códigos propios).
+  Consultas `customers` por `customer_code`, ciclo activo, conteo de
+  `loyalty_visits` activas y `rewards` disponible (vencidas/redimidas →
+  `null`). Respuesta: `{ customer, cycle, progress, reward }`.
+- **Core** (`supabase/functions/_shared/loyaltyEngineCore.js`):
+  `validateLookupPayload`, `decideLookupPolicy`, `buildLookupResult` (puro,
+  `now` inyectable) y `lookup` en `OPERATIONS`/`CUSTOMER_DENIALS`.
+- **Frontend**: `src/services/loyalty/loyaltyEdgeClient.js` (nuevo, patrón
+  `adminEdgeClient`: JWT Bearer, `VITE_LOYALTY_ENGINE_FUNCTION_URL` con
+  fallback `${VITE_SUPABASE_URL}/functions/v1/loyalty-engine`);
+  `staffService.scanCustomerToken()` bifurca demo (mock) / real (Edge);
+  `CustomerFound.jsx` muestra el shape lookup (progreso X/Y, faltantes,
+  recompensa+vence) y en modo real deshabilita Canjear/Registrar; `App.jsx`
+  transporta el resultado completo.
+- **Tests**: `tests/loyalty-engine-lookup.test.mjs` (core) y
+  `tests/loyalty-edge-client.test.mjs` (frontend). **347/347 pass** (296
+  previos + 51 nuevos); `npm run build` OK (aviso de chunk preexistente);
+  `npm audit` 0; `git diff --check` limpio (solo avisos LF/CRLF).
+- **Sin commit y sin push** (igual que los checkpoints anteriores). El
+  flujo operativo Staff ↔ Loyverse y el orden de los checkpoints posteriores
+  quedan descritos en la sección CP3.2 (ver arriba).
+
+---
+
 ## Checkpoint — Regla de loyalty de 7 visitas
 
 **Fecha:** 15 de septiembre de 2026.
@@ -206,7 +404,7 @@ Checkpoint de cierre documental. Reglas de negocio **sin cambios** (recompensa e
   - Tickets reconstruidos: `1-0759 → visita 1` · `1-0784 → visita 2` · `1-0980 → visita 3` · `1-0997 → visita 4`. Los 4 con `receipt_date` de Loyverse y `verse_id` persistido.
   - **Activity verificado manualmente**: muestra `4 → 3 → 2 → 1`; items de cada ticket correctos.
 - **Tests: 223/223** (`npm test`); **build OK** (`npm run build`, solo el aviso preexistente de chunk Vite > 500 kB).
-- PENDIENTE (sin cambios respecto a lo documentado): escrituras Staff sobre RPCs, scheduler cron formal de `loyverse-receipts-sync`, SMTP real para el envío de tickets por correo (`send-ticket` responde `email_not_configured`).
+- PENDIENTE (sin cambios respecto a lo documentado): escrituras Staff sobre RPCs, SMTP real para el envío de tickets por correo (`send-ticket` responde `email_not_configured`). El scheduler cron de `loyverse-receipts-sync` quedó definido en CP3.3-A (ver arriba).
 
 ---
 

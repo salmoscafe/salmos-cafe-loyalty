@@ -320,6 +320,9 @@ button.sc-timeline__hit--purchase:focus-visible, button.sc-timeline__hit--purcha
 }
 .sc-staff-tile--primary { background: var(--navy); color: var(--cream); border-color: var(--navy); }
 .sc-staff-tile--primary .sc-icon-lg { color: var(--cream); }
+.sc-staff-note { background: var(--cream); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
+.sc-staff-note__title { font-size: 13px; font-weight: 600; color: var(--navy); margin: 0 0 2px; }
+.sc-staff-note__sub { font-size: 12px; opacity: 0.65; margin: 0; line-height: 1.4; }
 
 .sc-scan-area {
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
@@ -331,6 +334,16 @@ button.sc-timeline__hit--purchase:focus-visible, button.sc-timeline__hit--purcha
 .sc-found-name { font-family: 'Instrument Serif', serif; font-size: 20px; margin: 6px 0 0; }
 .sc-found-number { font-size: 12.5px; opacity: 0.55; margin: 0; }
 .sc-found-progress { font-size: 13.5px; font-weight: 600; color: var(--navy); margin: 4px 0 0; }
+
+/* CP3.2 — estado del vínculo con Loyverse (solo modo real) */
+.sc-loyverse-status { border-radius: 12px; padding: 10px 14px; font-size: 12.5px; line-height: 1.45; margin: 12px 0 0; text-align: left; align-self: stretch; }
+.sc-loyverse-status__title { font-weight: 600; margin: 0 0 2px; }
+.sc-loyverse-status__sub { margin: 0; opacity: 0.85; }
+.sc-loyverse-status--ok { background: rgba(29,122,68,0.08); color: #1d7a44; }
+.sc-loyverse-status--warn { background: rgba(154,107,31,0.10); color: #9a6b1f; }
+.sc-found-hint { display: flex; align-items: flex-start; gap: 8px; background: var(--cream); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; font-size: 12.5px; line-height: 1.45; margin: 10px 0 0; text-align: left; }
+.sc-found-hint .sc-icon { color: var(--navy); flex-shrink: 0; margin-top: 1px; }
+.sc-found-hint p { margin: 0; opacity: 0.8; }
 
 .sc-confirmation { align-items: center; text-align: center; }
 .sc-confirmation__icon { color: var(--navy); }
@@ -348,6 +361,12 @@ button.sc-timeline__hit--purchase:focus-visible, button.sc-timeline__hit--purcha
 .sc-admin-sidebar__item { display: block; width: 100%; text-align: left; background: none; border: none; color: var(--cream); opacity: 0.65; font-size: 13.5px; font-weight: 500; padding: 10px 12px; border-radius: 10px; cursor: pointer; }
 .sc-admin-sidebar__item--active { opacity: 1; background: rgba(227,212,192,0.12); }
 .sc-admin-main { flex: 1; padding: 30px 34px; overflow-y: auto; }
+.sc-admin-signout {
+  position: absolute; top: 14px; right: 14px; z-index: 2;
+  border: none; background: var(--navy); color: var(--cream);
+  font-size: 12.5px; font-weight: 600; padding: 8px 14px; border-radius: 100px; cursor: pointer;
+  opacity: 0.9;
+}
 .sc-admin-title { font-family: 'Instrument Serif', serif; font-size: 26px; font-weight: 400; margin: 0 0 20px; }
 .sc-admin-subtitle { font-family: 'Instrument Serif', serif; font-size: 19px; font-weight: 400; margin: 28px 0 12px; }
 .sc-admin-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
@@ -360,6 +379,39 @@ button.sc-timeline__hit--purchase:focus-visible, button.sc-timeline__hit--purcha
 .sc-admin-table th, .sc-admin-table td { text-align: left; padding: 12px 16px; font-size: 13.5px; border-bottom: 1px solid var(--line); }
 .sc-admin-table th { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.5; }
 .sc-admin-empty { background: #fff; border: 1px dashed var(--line); border-radius: 16px; padding: 40px; text-align: center; opacity: 0.6; font-size: 13.5px; }
+
+/* ---- Admin · Empleados (CHECKPOINT 2) ---- */
+.sc-admin-employees__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.sc-admin-employees__head .sc-admin-title { margin-bottom: 16px; }
+.sc-admin-status { font-size: 13px; white-space: nowrap; }
+.sc-admin-status--active { color: #1d7a44; font-weight: 600; }
+.sc-admin-status--inactive { color: #9a6b1f; font-weight: 600; }
+.sc-admin-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.sc-admin-actions .sc-btn-secondary { padding: 6px 12px; font-size: 12.5px; }
+.sc-admin-notice { border-radius: 12px; padding: 10px 14px; font-size: 12.5px; line-height: 1.4; margin: 0 0 14px; }
+.sc-admin-notice--ok { background: rgba(29,122,68,0.08); color: #1d7a44; }
+.sc-admin-notice--error { background: rgba(150,48,48,0.08); color: #963030; }
+.sc-admin-modal-backdrop {
+  position: fixed; inset: 0; z-index: 40; background: rgba(16,15,15,0.45);
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.sc-admin-modal {
+  width: 100%; max-width: 420px; background: #fff; border-radius: 18px;
+  padding: 24px; box-shadow: 0 30px 70px -25px rgba(16,15,15,0.5);
+  display: flex; flex-direction: column; gap: 14px;
+}
+.sc-admin-modal .sc-admin-subtitle { margin: 0; }
+.sc-admin-modal__role {
+  display: flex; align-items: center; gap: 8px; border: 1.5px solid var(--line);
+  border-radius: 12px; padding: 10px 14px; background: var(--cream-light); font-size: 13.5px;
+  color: var(--ink);
+}
+.sc-admin-modal__actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
+
+@media (max-width: 760px) {
+  .sc-admin-modal-backdrop { align-items: flex-end; padding: 0; }
+  .sc-admin-modal { max-width: none; border-radius: 18px 18px 0 0; padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
+}
 
 @media (max-width: 760px) {
   .sc-admin-shell { flex-direction: column; margin: 0; border-radius: 0; min-height: 100vh; }

@@ -125,10 +125,10 @@ export const tickets = [];
 
 // --- staff_profiles ------------------------------------------------------------
 export const staffProfiles = [
-  { id: "emp_1", name: "Ana Beltrán", role: "staff", active: true, pin: "1234" },
-  { id: "emp_2", name: "Marco Reyes", role: "staff", active: true, pin: "5678" },
-  { id: "emp_3", name: "Luisa Padilla", role: "staff", active: true, pin: "2468" },
-  { id: "emp_9", name: "Diana Salazar", role: "admin", active: true, pin: "9999" },
+  { id: "emp_1", name: "Ana Beltrán", email: "ana@example.com", role: "staff", active: true, pin: "1234" },
+  { id: "emp_2", name: "Marco Reyes", email: "marco@example.com", role: "staff", active: true, pin: "5678" },
+  { id: "emp_3", name: "Luisa Padilla", email: "luisa@example.com", role: "staff", active: true, pin: "2468" },
+  { id: "emp_9", name: "Diana Salazar", email: "diana@example.com", role: "admin", active: true, pin: "9999" },
 ];
 
 // --- audit_logs ------------------------------------------------------------------

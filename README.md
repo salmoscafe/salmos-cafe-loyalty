@@ -35,7 +35,7 @@ complete"** (ver secciones N y O).
   de migrarlo a las RPCs transaccionales reales (`register_visit` /
   `cancel_visit` / `redeem_reward`).
 - **Sync de receipts Loyverse**: real (Edge `loyverse-receipts-sync`,
-  invocada por un scheduler/cron externo con `x-sync-secret`).
+  invocada cada 5 min por GitHub Actions con `x-sync-secret`).
 - **Auth Staff/Admin**: mock (PIN). **Auth Cliente**: Supabase Auth real.
 - **Migraciones `0001`–`0012`** presentes localmente. El estado **remoto**
   del proyecto Supabase quedó **pendiente de revalidación** en esta auditoría
@@ -464,8 +464,17 @@ supabase/
   cancelación) sobre las RPCs (`register_visit`/`cancel_visit`/
   `redeem_reward`) y eliminar el DEV bridge (`ensureLoyaltyProfile` +
   `mockDatabase`).
-- ⏳ Definir el **scheduler/cron formal** de `loyverse-receipts-sync` en el
-  ambiente productivo (invoque con `x-sync-secret`).
+- ✅ Scheduler formal de `loyverse-receipts-sync` en GitHub Actions
+  (`.github/workflows/loyverse-receipts-sync.yml`): ejecución cada 5 min,
+  POST a `vars.SYNC_URL` con `x-sync-secret: secrets.SYNC_CRON_SECRET`,
+  `concurrency` con `cancel-in-progress: true`, `timeout-minutes: 10`.
+  **Verificado end-to-end (QA 2026-09-16):** el workflow ejecutó la Edge
+  (`Sync OK`, 12 receipts procesados). Los 12 traían `customer_id: null` →
+  `no_customer` (ventas cobradas sin asignar cliente en el POS de Loyverse,
+  no un fallo del sync). Queda solo la **prueba controlada**: venta ≥ $50 MXN
+  asignando explícitamente un cliente en Loyverse → confirmar `customer_id` en
+  el receipt vía API → esperar/ejecutar el sync → verificar la visita en
+  Supabase.
 - ⏳ QR con **token firmado**.
 - ⏳ Emails branded en producción: publicar dominio, hospedar el logo en su
   URL definitiva (hoy URL provisional en `[LOGO_URL_PROVISIONAL]`), retirar

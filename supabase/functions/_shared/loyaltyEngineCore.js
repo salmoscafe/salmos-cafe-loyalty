@@ -39,7 +39,13 @@
 export const BUSINESS_TIMEZONE = "America/Tijuana";
 
 // Operaciones expuestas por la Edge Function.
-export const OPERATIONS = Object.freeze(["visit", "cancel", "redeem"]);
+// Está `lookup` porque es LECTURA (la usa Staff para consultar el progreso):
+// sigue siendo server-side con service_role, pero NO muta nada y NO va a una RPC.
+export const OPERATIONS = Object.freeze(["visit", "cancel", "redeem", "lookup"]);
+
+// Límite defensivo para el token de búsqueda (customer_code = SC-XXXXXXXX,
+// 12 chars; tope generoso por si mañana el QR se firma con un payload más largo).
+export const LOOKUP_TOKEN_MAX_LENGTH = 40;
 
 // UUID 8-4-4-4-12 (cualquier versión, case-insensitive).
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -60,7 +66,7 @@ export function errorOf(code, message, status = 400) {
 // ---------------------------------------------------------------
 export function validateOperation(value) {
   if (!OPERATIONS.includes(value)) {
-    return { ok: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel o redeem.") };
+    return { ok: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel, redeem o lookup.") };
   }
   return { ok: true };
 }
@@ -195,6 +201,24 @@ export function validateRedeemPayload(payload) {
   return { ok: true, data: { rewardId } };
 }
 
+// lookup → { token }  (token = customer_code del QR, p. ej. "SC-S4MCJPMW").
+// Solo se valida formato: cadena no vacía con tope de longitud. El match
+// contra customers.customer_code (o id) lo hace la Edge con service_role;
+// aquí NUNCA se decide quién puede consultar (eso es decideLookupPolicy).
+export function validateLookupPayload(payload) {
+  if (!isRecord(payload)) {
+    return { ok: false, error: errorOf("INVALID_PAYLOAD", "El cuerpo debe ser un objeto JSON.") };
+  }
+  const { token } = payload;
+  if (typeof token !== "string" || token.trim() === "") {
+    return { ok: false, error: errorOf("INVALID_TOKEN", "Código de cliente inválido.") };
+  }
+  if (token.length > LOOKUP_TOKEN_MAX_LENGTH) {
+    return { ok: false, error: errorOf("INVALID_TOKEN", "Código de cliente inválido.") };
+  }
+  return { ok: true, data: { token: token.trim() } };
+}
+
 // Validación completa para una operación (campos prohibidos + payload).
 export function validatePayload(operation, body) {
   const opCheck = validateOperation(operation);
@@ -217,8 +241,10 @@ export function validatePayload(operation, body) {
       return validateCancelPayload(body);
     case "redeem":
       return validateRedeemPayload(body);
+    case "lookup":
+      return validateLookupPayload(body);
     default:
-      return { ok: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel o redeem.") };
+      return { ok: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel, redeem o lookup.") };
   }
 }
 
@@ -255,22 +281,43 @@ export function isFutureDate(visitDate, now = new Date(), timezone = BUSINESS_TI
 }
 
 // ---------------------------------------------------------------
-// Actor policy — MUY IMPORTANTE
+// Actor policy — QUÉ CAMBIÓ EN CHECKPOINT 1
 // ---------------------------------------------------------------
-// No existe identidad Staff verificable en el sistema (no hay tabla
-// `staff`, no hay auth Staff). Todo usuario autenticado de Supabase
-// Auth es un cliente. La Edge NUNCA confía en actorRole/actorId del
-// payload (los rechaza en validación).
+// Antes: resolveActorRole() siempre devolvía 'customer' porque no
+// existía identidad Staff verificable; cualquier operación staff-only
+// se denegaba.
+//
+// Ahora: el rol se resuelve server-side desde public.profiles. La
+// Edge Function (loyalty-engine/index.ts) consulta profiles con su
+// cliente service_role y pasa el perfil a decideActorPolicy(). El
+// core sigue siendo 100% puro (no toca Supabase): recibe el perfil
+// ya resuelto.
+//
+// La regla sigue siendo: NUNCA confiar en un role enviado desde el
+// frontend. actorId/actorRole del payload se rechazan en validación.
+// resolveActorRole() no lee user_metadata ni app_metadata del JWT.
 
-// Único punto de evolución cuando exista Staff real. Hoy devuelve
-// 'customer' para cualquier usuario autenticado.
-export function resolveActorRole() {
-  return "customer";
+// Resuelve el rol desde el perfil real de public.profiles.
+// `profile` = { id, role, name, active } obtenido server-side con
+// service_role. Devuelve el rol si el perfil existe y está activo;
+// null en cualquier otro caso (sin perfil, inactivo o rol inválido).
+export function resolveActorRole(profile) {
+  if (!profile) return null;
+  if (profile.active === false) return null;
+  if (profile.role === "staff" || profile.role === "admin" || profile.role === "customer") {
+    return profile.role;
+  }
+  return null;
 }
 
-// NO inventar identidad: cualquier operación que requiera Staff se
-// deniega hasta que exista un mecanismo de auth Staff verificable.
-export function requireVerifiedStaff() {
+// Verifica que el actor tenga identidad Staff/Admin verificable
+// (perfil activo en public.profiles). Solo este camino devuelve
+// { allowed: true } para operaciones staff-only.
+export function requireVerifiedStaff(profile) {
+  const role = resolveActorRole(profile);
+  if (role === "staff" || role === "admin") {
+    return { allowed: true, actor: { actorId: profile.id, actorRole: role } };
+  }
   return {
     allowed: false,
     error: errorOf("STAFF_AUTH_REQUIRED", "Se requiere una identidad Staff verificable para esta operación.", 403),
@@ -282,30 +329,135 @@ const CUSTOMER_DENIALS = {
   visit: { code: "SELF_VISIT_NOT_ALLOWED", message: "Un cliente no puede registrarse su propia visita." },
   cancel: { code: "CUSTOMER_CANCEL_NOT_ALLOWED", message: "Un cliente no puede cancelar visitas." },
   redeem: { code: "CUSTOMER_REDEEM_NOT_ALLOWED", message: "Un cliente no puede redimir recompensas." },
+  lookup: { code: "CUSTOMER_LOOKUP_NOT_ALLOWED", message: "Un cliente no puede consultar clientes." },
 };
 
 // Política completa: decide quién puede ejecutar cada operación.
 //   { allowed: true,  actor: { actorId, actorRole } }
 //   { allowed: false, error: { code, message, status } }
-export function decideActorPolicy({ operation, user }) {
+// `profile` es el perfil de public.profiles resuelto server-side.
+export function decideActorPolicy({ operation, user, profile }) {
   if (!user || !user.id) {
     return { allowed: false, error: errorOf("UNAUTHORIZED", "Autenticación requerida.", 401) };
   }
 
-  const role = resolveActorRole(user);
-
-  if (role === "staff") {
-    // A futuro: un rol staff solo pasa si hay identidad verificable.
-    return requireVerifiedStaff(user);
+  // Perfil ausente o inactivo → no autorizar operaciones protegidas.
+  const role = resolveActorRole(profile);
+  if (!role) {
+    return {
+      allowed: false,
+      error: errorOf("PROFILE_NOT_FOUND", "No se pudo verificar tu perfil de acceso.", 403),
+    };
   }
 
-  // Hoy cualquier usuario autenticado es customer → las tres operaciones
-  // (todas staff-only) se deniegan con su código específico.
+  // staff/admin con perfil activo: autorizados (verify server-side).
+  if (role === "staff" || role === "admin") {
+    return requireVerifiedStaff(profile);
+  }
+
+  // customer: las tres operaciones staff-only se deniegan.
   const denial = CUSTOMER_DENIALS[operation];
   if (denial) {
     return { allowed: false, error: errorOf(denial.code, denial.message, 403) };
   }
-  return { allowed: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel o redeem.", 400) };
+  return { allowed: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel, redeem o lookup.", 400) };
+}
+
+// ---------------------------------------------------------------
+// Lookup policy — SOLO staff/admin activo puede consultar clientes
+// ---------------------------------------------------------------
+// CHECKPOINT 3.1: la consulta de clientes (lookup) es una operación
+// de LECTURA staff-only. El rol se resuelve server-side desde
+// public.profiles (mismo patrón que decideActorPolicy), pero con
+// códigos específicos para que el frontend pueda distinguir:
+//   * sin sesión        → UNAUTHORIZED 401
+//   * sin perfil        → PROFILE_NOT_FOUND 403
+//   * perfil inactivo   → PROFILE_INACTIVE 403 (staff desactivado)
+//   * rol customer      → CUSTOMER_LOOKUP_NOT_ALLOWED 403
+//   * rol staff/admin   → allowed (activo, verificado server-side)
+// NUNCA se confía en user_metadata/app_metadata del JWT: el rol es
+// siempre el que devuelve public.profiles vía service_role.
+export function decideLookupPolicy({ user, profile }) {
+  if (!user || !user.id) {
+    return { allowed: false, error: errorOf("UNAUTHORIZED", "Autenticación requerida.", 401) };
+  }
+  if (!profile) {
+    return { allowed: false, error: errorOf("PROFILE_NOT_FOUND", "No tienes permisos para consultar clientes.", 403) };
+  }
+  if (profile.active === false) {
+    return { allowed: false, error: errorOf("PROFILE_INACTIVE", "Tu cuenta de empleado está inactiva.", 403) };
+  }
+  if (profile.role === "staff" || profile.role === "admin") {
+    return { allowed: true, actor: { actorId: profile.id, actorRole: profile.role } };
+  }
+  return { allowed: false, error: errorOf("CUSTOMER_LOOKUP_NOT_ALLOWED", "Un cliente no puede consultar clientes.", 403) };
+}
+
+// ---------------------------------------------------------------
+// Lookup result — forma pura del resultado de la consulta (CP3.1)
+// ---------------------------------------------------------------
+// Recibe los registros crudos que leyó la Edge (customers, ciclo,
+// conteo de visitas activas, recompensa) y arma la respuesta de
+// contrato. Es 100% puro (sin red, sin Supabase, `now` inyectable
+// para probar la expiración de la recompensa).
+//
+// Respuesta mínima (CP3.1 + CP3.2):
+//   customer { id, name, customer_code, loyverse_mapped }
+//   cycle    { id, cycle_number, required_visits, active } | null
+//   progress { visits, required, remaining, unlocked }      | null
+//   reward   { id, status, expires_at, max_value }          | null
+// La recompensa solo se devuelve si está DISPONIBLE y NO vencida;
+// en cualquier otro caso (redeemed, cancelled, expirada) es null.
+// `required` es SIEMPRE cycle.required_visits (fuente de verdad:
+// nunca se hardcodea 7).
+//
+// CP3.2 — loyverse_mapped: booleano operativo derivado en SERVIDOR de la
+// presencia de customers.loyverse_customer_id (la Edge selecciona esa
+// columna solo para derivarlo; aquí se STRIPEA y jamás sale el id real).
+// Sirve para que el Staff sepa si el receipt de Loyverse podrá asociarse
+// al cliente (receipts-sync ignora customer_id sin mapeo → unmapped_customer).
+export function buildLookupResult({ customer, cycle, activeVisits, reward, now = new Date() }) {
+  const customerOut = customer
+    ? {
+        id: customer.id,
+        name: customer.name || "",
+        customer_code: customer.customer_code || "",
+        loyverse_mapped: Boolean(customer.loyverse_customer_id),
+      }
+    : null;
+
+  let cycleOut = null;
+  let progressOut = null;
+  let rewardOut = null;
+
+  if (cycle) {
+    cycleOut = {
+      id: cycle.id,
+      cycle_number: cycle.cycle_number,
+      required_visits: cycle.required_visits,
+      active: cycle.status === "active",
+    };
+
+    const visits = Number(activeVisits) || 0;
+    const required = Number(cycle.required_visits) || 0;
+    progressOut = {
+      visits,
+      required,
+      remaining: Math.max(required - visits, 0),
+      unlocked: visits >= required,
+    };
+
+    if (reward && reward.status === "available" && new Date(reward.expires_at).getTime() > now.getTime()) {
+      rewardOut = {
+        id: reward.id,
+        status: reward.status,
+        expires_at: reward.expires_at,
+        max_value: reward.max_value,
+      };
+    }
+  }
+
+  return { customer: customerOut, cycle: cycleOut, progress: progressOut, reward: rewardOut };
 }
 
 // ---------------------------------------------------------------

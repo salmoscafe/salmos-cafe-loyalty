@@ -298,6 +298,31 @@ export async function signInWithGoogle() {
   return { ok: true, status: "new" };
 }
 
+// -------------------------------------------------------------------
+// Perfil de rol (profiles). En modo mock, mapea perfiles existentes:
+//   * session de customer → { role: 'customer' }
+//   * session de staff    → { role: staffProfiles[i].role }
+// -------------------------------------------------------------------
+
+async function profileFor(sessionRef, staffProfile) {
+  await delay(100);
+  if (staffProfile) {
+    return { id: staffProfile.id, role: staffProfile.role, name: staffProfile.name, active: staffProfile.active };
+  }
+  const customer = customers.find((c) => c.id === sessionRef.customerId);
+  if (!customer) {
+    // Usuario autenticado sin customer registrado: nunca se trata como
+    // staff/admin por defecto — el rol por omisión es 'customer'.
+    return null;
+  }
+  return { id: customer.id, role: "customer", name: customer.name, active: true };
+}
+
+export async function getProfile() {
+  const staffProfile = staffProfiles.find((s) => s.id === staffSession.staffId) || null;
+  return profileFor(session, staffProfile);
+}
+
 // --- Staff -----------------------------------------------------------------
 
 export async function getStaffSession() {
