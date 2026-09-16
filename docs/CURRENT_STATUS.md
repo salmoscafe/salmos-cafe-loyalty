@@ -1,13 +1,13 @@
 # Salmos Café Loyalty — Current Status
 
-Estado del proyecto sobre `main` @ `0b3f41b`
-(`feat: implement customer authentication and loyverse linking`), con la
-tarea **"Actualizar automáticamente la información de clientes existentes en
-Loyverse"** implementada (código listo, **sin commit ni push**). Todo lo
-documentado aquí fue verificado contra el código real y el proyecto remoto;
-nada se da por sentado de la documentación.
+Estado del proyecto sobre `main` @ `483eeae`
+(`feat(loyalty): update reward cycle to 7 visits`). Los cambios de las
+pantallas Cliente (Activity/Home/Rewards) están pendientes de stage (ver
+checkpoint "Mejoras UI/copy" abajo). Todo lo documentado aquí fue verificado
+contra el código real y el proyecto remoto; nada se da por sentado de la
+documentación.
 
-Última actualización: 2026-09-15.
+Última actualización: 2026-09-16.
 
 ---
 
@@ -138,6 +138,56 @@ Sincronización).
 Antes de cualquier `git add`/`commit`: **separar los cambios por tarea** (la
 regla de 7 visitas por un lado; los preexistentes de Activity/Home/Rewards por
 otro). No se ejecuta en este checkpoint.
+
+---
+
+## Checkpoint — Mejoras UI/copy de Activity/Home/Rewards
+
+**Fecha:** 16 de septiembre de 2026.
+
+**Objetivo:** documentar los cambios de presentación (UI/copy) de las
+pantallas Cliente que quedaron pendientes de stage en el checkpoint de la
+regla de 7 visitas. **Sin cambios de lógica de loyalty y sin tocar la regla
+de 7 visitas.** Sin commit todavía.
+
+### Activity.jsx
+
+- Timeline de actividad con **títulos más cortos y emojis** ("🎉 ¡Conseguiste
+  una recompensa!", "☕ Recompensa canjeada", "Recompensa cancelada",
+  "Recompensa vencida").
+- `label` de la recompensa pasa a **metadata secundaria**
+  (`.sc-timeline__meta`) en los eventos que no son compras (`!isPurchase`);
+  las compras no tienen `label`.
+- **Logging de errores de carga** con `console.error("[Activity] load", e)`
+  además del mensaje amigable.
+
+### Home.jsx
+
+- Nuevo estado visual `ready = unlocked || remaining === 0`: **`remaining ===
+  0` se trata como recompensa lista** (ciclo 7/7 completado mientras aún no
+  llega `currentReward`).
+- Copy: "🎉 ¡Tu recompensa está lista!" y "Disponible para canjear".
+- Evita el mensaje contradictorio "Te faltan 0 visitas".
+
+### Rewards.jsx
+
+- Copy "¡Disponible para canjear!" para la recompensa vigente; la rama
+  `remaining === 0` también lo muestra (evita "0 visitas restantes").
+- La recompensa vigente vuelve a mostrar su fecha de expiración:
+  "¡Disponible para canjear! · Vence el {fecha}" (`currentReward.expiresAt`).
+  Se detectó y corrigió una pérdida de transparencia de la expiración; la
+  regla de 3 meses no cambió y el dato sigue siendo el real de los
+  servicios.
+
+### Compatibilidad
+
+Los 3 cambios son de **presentación/copy** y son **compatibles con la regla
+de 7 visitas**: leen `cycle.requiredVisits` / `REQUIRED_VISITS` (sin números
+hardcodeados) y no alteran el motor de lealtad.
+
+### Estado de Git
+
+Cambios sin stage, **sin commit ni push** (pendiente de decisión del equipo).
 
 ---
 

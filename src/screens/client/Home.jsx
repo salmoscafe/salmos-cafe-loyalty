@@ -14,6 +14,7 @@ export function HomeScreen({ customer, card, cycle, currentReward, loading, erro
   const required = cycle?.requiredVisits ?? REQUIRED_VISITS;
   const remaining = Math.max(required - visits, 0);
   const unlocked = Boolean(currentReward);
+  const ready = unlocked || remaining === 0;
   const half = visits === Math.floor(required / 2);
 
   return (
@@ -21,7 +22,7 @@ export function HomeScreen({ customer, card, cycle, currentReward, loading, erro
       <div className="sc-hero-copy">
         <p className="sc-eyebrow-plain">Tu tarjeta</p>
         <h1 className="sc-hero-title">
-          {unlocked ? "Tu café gratis te espera" : `Estás a ${remaining} visita${remaining === 1 ? "" : "s"} de tu recompensa`}
+          {ready ? "🎉 ¡Tu recompensa está lista!" : `Te faltan ${remaining} visita${remaining === 1 ? "" : "s"} para tu recompensa`}
         </h1>
       </div>
 
@@ -68,10 +69,10 @@ export function HomeScreen({ customer, card, cycle, currentReward, loading, erro
           <Icon.Cup className="sc-icon" />
         </div>
         <div className="sc-next-reward__body">
-          <p className="sc-next-reward__label">Tu próxima recompensa</p>
+          <p className="sc-next-reward__label">Tu recompensa</p>
           <p className="sc-next-reward__name">Café gratis</p>
           <p className="sc-next-reward__sub">
-            {unlocked ? "Ya puedes canjearla" : `Te faltan ${remaining} visita${remaining === 1 ? "" : "s"}`}
+            {ready ? "Disponible para canjear" : `Te faltan ${remaining} visita${remaining === 1 ? "" : "s"}`}
           </p>
           <div className="sc-progressbar">
             <div className="sc-progressbar__fill" style={{ width: `${(visits / required) * 100}%` }} />

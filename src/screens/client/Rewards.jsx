@@ -44,8 +44,10 @@ export function RewardsScreen({ card, cycle, currentReward }) {
           <p className="sc-reward-current__name">Café gratis</p>
           <p className="sc-reward-current__meta">
             {unlocked
-              ? `Lista para canjear · vence el ${formatDate(currentReward.expiresAt)}`
-              : `${remaining} visita${remaining === 1 ? "" : "s"} restante${remaining === 1 ? "" : "s"}`}
+              ? `¡Disponible para canjear! · Vence el ${formatDate(currentReward.expiresAt)}`
+              : remaining > 0
+                ? `${remaining} visita${remaining === 1 ? "" : "s"} restante${remaining === 1 ? "" : "s"}`
+                : "¡Disponible para canjear!"}
           </p>
         </div>
         {unlocked && <span className="sc-badge">Lista</span>}

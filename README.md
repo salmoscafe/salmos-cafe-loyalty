@@ -479,6 +479,8 @@ supabase/
 - ⏳ **Revalidar el estado remoto** del proyecto Supabase (`supabase db push`
   / `migration list`) con `SUPABASE_DB_PASSWORD` (pendiente de esta
   auditoría).
+- ⏳ Commit de las **mejoras UI/copy** de Activity/Home/Rewards (checkpoint
+  2026-09-16 en `docs/CURRENT_STATUS.md`; cambios sin stage).
 
 ## P. Historial importante de decisiones
 
@@ -529,6 +531,17 @@ supabase/
   "8ª visita" corregido en `supabase/functions/_shared/loyaltyEngineCore.js`
   para reflejar la regla vigente de **7 visitas** (sin cambios de lógica;
   auditoría verificó que no hay otros comentarios equivalentes en el código).
+- **Checkpoint UI/copy de pantallas Cliente (2026-09-16, sin commit)**:
+  mejoras de presentación en `Activity.jsx` (títulos cortos + emojis en el
+  timeline; `label` como metadata secundaria en eventos no-compra;
+  `console.error` en la carga), `Home.jsx` (`ready`: `remaining === 0` se
+  muestra como recompensa lista; "Tu recompensa está lista" / "Disponible
+  para canjear"; evita "Te faltan 0 visitas") y `Rewards.jsx` ("Disponible
+  para canjear"; evita "0 visitas restantes"). Solo copy/UX — la regla de 7
+  visitas y su lógica no se tocan. Se detectó y corrigió una pérdida de
+  transparencia: la recompensa vigente volvió a mostrar su expiración
+  ("¡Disponible para canjear! · Vence el {fecha}", `currentReward.expiresAt`)
+  sin cambiar la regla de 3 meses.
 
 ## Documentation
 

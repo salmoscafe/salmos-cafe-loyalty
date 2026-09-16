@@ -49,7 +49,8 @@ export function ActivityScreen({ customer, card }) {
           (a, b) => new Date(b.date) - new Date(a.date)
         );
         setEvents(merged);
-      } catch {
+      } catch (e) {
+        console.error("[Activity] load", e);
         if (!cancelled) setError("No pudimos cargar tu actividad.");
       }
     }
@@ -63,10 +64,10 @@ export function ActivityScreen({ customer, card }) {
   const LABELS = {
     purchase: (ev) => `Compra registrada · ${formatCurrency(ev.amount)}`,
     purchase_cancelled: (ev) => `Compra cancelada · ${formatCurrency(ev.amount)}`,
-    reward_earned: (ev) => `Recompensa obtenida · ${ev.label}`,
-    reward_redeemed: (ev) => `Recompensa canjeada · ${ev.label}`,
-    reward_cancelled: (ev) => `Recompensa invalidada · ${ev.label}`,
-    reward_expired: (ev) => `Recompensa vencida · ${ev.label}`,
+    reward_earned: () => "🎉 ¡Conseguiste una recompensa!",
+    reward_redeemed: () => "☕ Recompensa canjeada",
+    reward_cancelled: () => "Recompensa cancelada",
+    reward_expired: () => "Recompensa vencida",
   };
 
   function openReceipt(ev) {
@@ -116,6 +117,7 @@ export function ActivityScreen({ customer, card }) {
                 </span>
                 <span className="sc-timeline__body">
                   <span className="sc-timeline__title">{LABELS[ev.type](ev)}</span>
+                  {!isPurchase && <span className="sc-timeline__meta">{ev.label}</span>}
                   <span className="sc-timeline__meta">{formatDateTime(ev.date)}</span>
                 </span>
                 {isPurchase && <Icon.ChevronRight className="sc-icon-sm sc-timeline__chevron" />}
