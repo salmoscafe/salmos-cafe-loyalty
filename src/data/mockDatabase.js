@@ -7,7 +7,7 @@
 // reales y el resto de la app no se entera.
 // ---------------------------------------------------------------
 
-const REQUIRED_VISITS = 8;
+const REQUIRED_VISITS = 7;
 const MIN_SALE_AMOUNT = 50;
 const REWARD_MAX_VALUE = 150;
 const REWARD_EXPIRY_MONTHS = 3;
@@ -69,7 +69,7 @@ export const loyaltyCycles = [
     id: "cyc_0",
     cardId: "card_1",
     visits: 8,
-    requiredVisits: REQUIRED_VISITS,
+    requiredVisits: 8,
     status: "completed",
     startedAt: "2026-06-20T09:00:00-08:00",
     completedAt: "2026-08-15T12:00:00-08:00",

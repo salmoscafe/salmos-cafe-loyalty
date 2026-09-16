@@ -1,925 +1,544 @@
 # Salmos Café Loyalty
 
-Programa de lealtad de **Salmos Café**: una SPA (React) para clientes, staff y
-admin donde cada compra elegible suma una visita y la **8ª visita** gana un
-café gratis. La cuenta del cliente vive en **Supabase** (Auth + Postgres +
-Edge Functions) y se sincroniza con el registro de clientes del **POS
-Loyverse** (crear, vincular y actualizar) sin duplicados.
-
-El proyecto está en **desarrollo activo**: la base, la autenticación de
-cliente y la sincronización con Loyverse (clientes y receipts) están
-implementadas; el motor de lealtad corre con reglas reales en Postgres y
-las **lecturas del cliente (Home/Recompensas/Actividad/Perfil) consumen
-datos reales de Supabase**. El **motor de escrituras** del flujo Staff
-(registrar venta manual, canjear, cancelar desde la app) sigue sobre mock
-en el frontend, a la espera de migrarlo a las RPCs transaccionales.
-**No está "production complete".**
-
-## Current checkpoint — 2026-09-15 — QA ticket (receipt_date, orden, verse_id)
-
-Estado verificable del repositorio tras el checkpoint de QA **aprobado** para
-el detalle del ticket (fecha real del recibo, orden cronológico, items y
-versículo persistido). Reglas de negocio sin cambios.
-
-### Arquitectura actual: Loyverse → Supabase → App
-
-```
-Loyverse (API v1.0) ──► Edge `loyverse-receipts-sync` ──► Supabase ──► App Salmos (Activity)
-                            │  register_visit_with_receipt     │
-                            └────────► loyalty_visits (items, receipt_date, verse_id)
-```
-
-- **Loyverse** sigue siendo la fuente de verdad de la venta: `GET /v1.0/receipts`
-  entrega `receipt_number`, `receipt_date`, `line_items`, `cancelled_at`, etc.
-  (solo server-side).
-- La Edge Function sincroniza por ventana `updated_at` y registra cada venta
-  elegible como visita con `external_sale_id =
-  loyverse_receipt_<store>_<receipt_number>` (idempotente por UNIQUE).
-- **`receipt_date` = fecha REAL del ticket de Loyverse** (instante de la
-  compra); **`created_at` = fecha de sincronización** (cuándo la Edge escribió
-  la fila). La vista Cliente muestra `receipt_date`; `created_at` es solo
-  fallback mientras `0010` no esté aplicada.
-
-### Orden y progreso
-
-- **Activity ordena los tickets de más reciente a más antiguo** usando la
-  fecha real del ticket (`receipt_date` → `visit_date` → `created_at`):
-  `saleOrdering.visitSortTimestamp` + `compareVisitsDesc`.
-- **El progreso histórico se calcula cronológicamente**:
-  `computeCycleProgress` ordena las visitas de cada ciclo por fecha real del
-  recibo y deriva, para cada visita, cuántas visitas activas la preceden.
-  No hay contador almacenado: el progreso se deriva de `loyalty_visits`.
-
-### Ticket y versículo persistido
-
-- Cada visita puede tener un **`verse_id` persistido (migración `0011`)**:
-  se asigna al registrar la visita (aleatorio del pool `bible_verse_pool`) y
-  se conserva ante re-sync. El ticket imprime ese versículo; solo las visitas
-  históricas previas a `0011` caen al versículo del día como fallback.
-- El detalle del ticket (`items` y `receipt_date`) lo persiste
-  `register_visit_with_receipt` (`0010`) **sin cambiar** las reglas de lealtad
-  de `register_visit`.
-
-### Reglas de fidelidad vigentes (sin cambios)
-
-- Recompensa en la **8ª visita** del ciclo.
-- Compra mínima: **$50 MXN**.
-- **Máximo 1 visita válida por cliente por día** (índice único parcial
-  `(customer_id, visit_date) WHERE status = 'active'`) — sin cambios.
-- Recompensa: 1 bebida o hasta **$150 MXN** de consumo.
-- Vigencia: **3 meses** desde que se gana.
-- Cancelar una compra **revierte la visita**; si era la 8ª generadora, invalida
-  la recompensa y reabre el ciclo; una recompensa ya redimida no se cancela.
-
-### QA aprobado
-
-- Se limpió **solo** el historial de prueba del cliente Javier en
-  `loyalty_visits` (nada de Loyverse se modificó ni borró).
-- Se retrocedió temporalmente `loyverse_sync_state.updated_at_min` a
-  `2026-09-07` y se reejecutó `loyverse-receipts-sync`:
-  - `receipts: 297` · `registered: 4` · `reused: 0` · `detail_unavailable: 0`.
-- Tickets reconstruidos: `1-0759` → visita 1 · `1-0784` → visita 2 ·
-  `1-0980` → visita 3 · `1-0997` → visita 4.
-- Los 4 tienen `receipt_date` proveniente de Loyverse y `verse_id` persistido.
-- **Activity verificado manualmente**: muestra `4 → 3 → 2 → 1`; los items de
-  cada ticket aparecen correctamente.
-- (**En curso de cierre del checkpoint:** los commits de esta entrega se
-  publican en GitHub al aprobarse.)
-
-## Estado verificado — 2026-09-15
-
-Verificación puntual (auditoría) del repositorio en esta fecha, **complementaria**
-del checkpoint de QA anterior (no lo reemplaza ni lo contradice). Todo se verificó
-ejecutando contra `C:\Users\javier.castro\Documents\Personal\Projects\App Salmos LC`.
-
-### Tests y build
-
-- **`npm test` → 243/243 pasando** (`node --test` sobre `tests/*.test.mjs`).
-  Incluyen las suites nuevas `send-ticket-email` (paridad del correo del ticket
-  contra `psalms.js`/`ticketVerse.js`/`code128.js`/`salesService`/`receiptsSyncCore`)
-  y `smtp-conn` (resolución del puerto SMTP).
-- **`npm run build` → ✓ en 3.07s.** Solo el aviso **preexistente** de chunk Vite
-  > 500 kB (`index-*.js` 595.29 kB, gzip 196.70 kB); sin errores.
-
-### Estado de git
-
-- Rama `main`, **up to date con `origin/main`**. Último commit: `b3e8047`
-  ("feat: finalize Loyverse receipt sync and ticket ordering").
-- Working tree con cambios **sin commitear** (etapa de tickets/email), sin secretos:
-
-  *Modificados:*
-  - `.env.example` — documenta las variables SMTP de `send-ticket`
-    (`SMTP_HOST/PORT/USER/PASS/SENDER_EMAIL/SENDER_NAME/APP_URL`); solo nombres/documentación.
-  - `src/styles.css` — espaciado de `.sc-receipt-actions__btn` (gap 10→14, margin-top 6→18).
-  - `supabase/functions/send-ticket/index.ts` — reenvío del ticket por correo
-    (transporte nodemailer, verificación de propiedad del ticket por JWT).
-
-  *Sin trackear:*
-  - `supabase/functions/_shared/smtpConn.js` (resolución de puerto SMTP, default 465).
-  - `supabase/functions/_shared/ticketEmail.js` (renderer HTML del correo).
-  - `supabase/functions/_shared/ticketEmailCode128.js` (folio + Code 128).
-  - `supabase/functions/_shared/ticketEmailVerses.js` (pool de 49 pasajes elegibles).
-  - `tests/send-ticket-email.test.mjs`, `tests/smtp-conn.test.mjs`.
-  - `email-templates/assets/wordmark-navy.png` (logo navy del ticket del correo).
-
-### Tickets / email / SMTP (verificado leyendo la implementación)
-
-- Edge `send-ticket` (`verify_jwt = true`): el correo destino sale **siempre** de
-  `user.email`/`customers.email` (el payload no puede fijarlo); el ticket se
-  verifica como propio por `customer_id` + `external_sale_id` (RLS del cliente,
-  sin `service_role`); sin SMTP configurado responde `email_not_configured`
-  (no simula el envío); los errores SMTP se sanitizan (redacta user/pass).
-- **Transporte: `nodemailer` (`npm:nodemailer@^9`)** sustituyó a `deno.land/x/smtp`
-  (API Deno 1.x obsoleta → `Deno.writeAll is not a function`). Gmail con implicit
-  TLS en 465 (`secure: port === 465`); 587 → STARTTLS automático.
-- El correo renderiza: wordmark cream (header) y navy (ticket), items reales,
-  TOTAL, estado de lealtad (activa+recompensa / activa / cancelada), versículo
-  persistido (`verse_id` → pool de 49, fallback por fecha) y barcode Code 128
-  (folio = último segmento de `external_sale_id` > `external_sale_id` > `id`);
-  CTA "Abrir mi tarjeta" **solo** si `SMTP_APP_URL` está definida. La suite
-  `assertNoFakeData` garantiza que el HTML nunca contiene datos de ejemplo.
-- **Envío real: pendiente** — falta configurar SMTP en el entorno de la Edge y
-  cerrar dominio/SPF/DKIM/DMARC (externo al repo).
-
-### Loyverse / Supabase (verificado leyendo migraciones y core)
-
-- Migraciones `0001`–`0011` presentes; revisadas en esta auditoría:
-  `register_visit_with_receipt` (0010/0011) persiste `items`/`receipt_date`/
-  `verse_id` sin tocar las reglas de `register_visit`; pool `bible_verse_pool`
-  (49 ids == `TICKET_VERSE_IDS` == los pasajes elegibles del dataset).
-- Reglas de fidelidad confirmadas sin cambios: 8ª visita, mín. $50 MXN,
-  máx. 1 visita/día, recompensa hasta $150 MXN, vigencia 3 meses, cancelación
-  revierte la visita, idempotencia por `external_sale_id` UNIQUE.
-- `receiptsSyncCore`/`loyverseCore`/`syncClaim` revisados: `external_sale_id =
-  loyverse_receipt_<store>_<receipt_number>`, ventana `LOYVERSE_WINDOW_DAYS = 30`,
-  watermark `loyverse_sync_state`, claim atómico por fila (lease 10 min, `409
-  loyverse_sync_in_progress` retriable).
-
-### Diferencias y pendientes encontrados
-
-- **Conteo de tests**: el README contiene conteos históricos (155/155 en un QA
-  previo y 223 en "Tests / calidad"); el número real al día de hoy es **243/243**.
-- **Discrepancia documental menor**: el bloque nuevo de `.env.example` y
-  `tests/smtp-conn.test.mjs` aún describen `deno.land/x/smtp`/`connectTLS`, pero
-  la implementación real usa `nodemailer`. No afecta la regla de puerto (465),
-  pero conviene sincronizarlos.
-- **`Cafe Salmos`**: la carpeta de trabajo de esta sesión era un scaffold vacío
-  del CLI de Supabase (guardaba solo `supabase/.temp/linked-project.json`, sin
-  código ni git), distinta del repo real; se dejó **intacta** y no forma parte
-  del commit.
-- Pendientes del proyecto (sin cambios respecto al checkpoint): escrituras Staff
-  sobre las RPCs, scheduler/cron formal de `loyverse-receipts-sync`, QR firmado,
-  dominio/SPF/DKIM/DMARC para correos y despliegue de `send-ticket`.
-
-## Current checkpoint — 2026-09-14
-
-Estado verificable del repositorio en esta fecha (checkpoint documental de Git).
-
-- **Migraciones sincronizadas `0001`–`0008`.** La `0008` es el hardening de
-  identidad de clientes: índices únicos normalizados de email/teléfono,
-  grants mínimos para `authenticated` y campos de vinculación Loyverse bajo
-  control server-side / `service_role`.
-- **Hardening H1 + C4 completado**: el navegador ya no escribe
-  `loyverse_customer_id` / `loyverse_sync_status`; la vinculación Loyverse la
-  hace la Edge Function `loyverse-customers` con la identidad del usuario
-  autenticado + `service_role`; `body.email` dejó de ser fuente de identidad;
-  la vinculación solo por teléfono queda **bloqueada hasta verificar**; los
-  índices únicos normalizados previenen duplicados/ambigüedad de identidad.
-- **Tests: 203/203 pasando** (`node --test "tests/*.test.mjs"`).
-- **Build: pasa** (`npm run build`; solo el aviso preexistente de chunk Vite
-  > 500 kB, no se tocó en este checkpoint).
-- **Sync de receipts Loyverse desplegado y validado**: Edge Function
-  `loyverse-receipts-sync`; la última corrida real procesó **979 receipts** y
-  registró **2 visitas válidas** (ventana `LOYVERSE_WINDOW_DAYS = 30` y
-  checkpoint clampado a la historia disponible del plan).
-- **La app lee datos reales de Supabase**: el cliente de prueba **Javier
-  refleja 2/8** visitas del pipeline real Loyverse → Edge Function → Supabase
-  → App Salmos.
-- **Reglas de lealtad vigentes**: recompensa en la **8ª visita**; compra
-  mínima **$50 MXN**; **máx. 1 visita válida por cliente por día**;
-  recompensa de **1 bebida o hasta $150 MXN**; vigencia **3 meses**; cancelar
-  revierte la visita y, si era la 8ª generadora, invalida la recompensa y
-  reabre el ciclo; una recompensa **ya redimida no se puede cancelar**;
-  marketing diferido para después.
-- **SMS OTP: analizado, NO implementado.** Dirección planificada: mantener
-  email/contraseña como método primario; añadir OTP por SMS más adelante
-  para A) recuperación de contraseña por teléfono y C) verificación/cambio
-  de teléfono en Settings. **Sin login passwordless.** H1+C4 se mantiene.
-- **Twilio Verify seleccionado como dirección futura** (integración nativa
-  Supabase, `provider = "twilio_verify"`), SMS solo como canal de OTP.
-  El setup de Twilio está **temporalmente pausado** (el alta de cuenta quedó
-  bloqueada por un mensaje temporal de "Too many attempts" de verificación);
-  no se implementa Twilio/SMS en este checkpoint.
-- **SMTP**: la configuración remota existente permanece intacta (sin cambios
-  en este checkpoint).
-- **Git**: rama `main`, remote `origin` → `github.com/salmoscafe/salmos-
-  cafe-loyalty`; este checkpoint se documenta en un commit de `docs:` que
-  toca únicamente `README.md`.
-
-### Checkpoint oficial — 2026-09-14
-
-Estado documental verificado a esta fecha. Todo lo listado aquí refleja lo
-que hay en el repositorio en este momento y las validaciones realizadas.
-
-#### 1) Arquitectura actual: App Salmos → Supabase → Loyverse
-
-```
-App Salmos (React/Vite) ──► Supabase ──► api.loyverse.com
-    (Cliente / Staff / Admin)   (Auth + Postgres + Edge Fns)
-```
-
-- **App Salmos (React + Vite `src/`)**: experiencia Cliente/Staff/Admin
-  por pathname (`/`, `/Staff`, `/Admin`). El Cliente se autentica con
-  Supabase Auth y **lee su tarjeta, ciclo, visitas y recompensas
-  directamente desde Postgres** (RLS: solo lo suyo) vía `services/`.
-  Las RPCs de lealtad (escrituras) se invocan server-side; el cliente
-  nunca incrementa sus propias visitas.
-- **Supabase (PostgreSQL 17 + Auth + Edge Functions)**: fuente de verdad
-  de identidad, reglas de lealtad (RPCs transaccionales idempotentes),
-  datos (`customers`, `loyalty_cycles`, `loyalty_visits`, `rewards`,
-  `audit_logs`), estado del sync (`loyverse_sync_state`) y la defensa de
-  concurrencia (claims). Toda escritura sensible pasa por RPCs
-  `SECURITY DEFINER` con grants de `service_role`.
-- **Loyverse (API v1.0)**: POS como fuente de verdad de ventas/receipts y
-  del catálogo de clientes. Únicamente server-side desde Edge Functions.
-
-#### 2) Reglas oficiales de lealtad
-
-Reglas implementadas en el motor SQL (migraciones `0002`/`0005`/`0007`):
-
-- Recompensa en la **8ª visita** activa del ciclo (`required_visits`
-  default 8; el motor lee el valor de `loyalty_cycles.required_visits`).
-- Compra mínima **$50 MXN** (`loyalty_visits.amount >= 50`, CHECK).
-- Máximo **1 visita activa por cliente por día** (índice único parcial
-  `(customer_id, visit_date) WHERE status = 'active'` + lógica
-  transaccional).
-- Recompensa: bebida "Café gratis" o consumo hasta **$150 MXN**
-  (`rewards.max_value` default 150).
-- Vigencia **3 meses** (`expires_at = earned_at + interval '3 months'`);
-  el estado "expired" se deriva en lectura.
-- Cancelación **revierte la visita** (`cancel_visit`).
-- Cancelar la **8ª visita invalida la recompensa y reabre el ciclo**
-  (`rewards.status = 'cancelled'`, el ciclo vuelve a `active`).
-- **No se puede cancelar** una visita cuyo ciclo ya fue **redimido**
-  (la RPC bloquea con `P0001` sin modificar nada).
-- Idempotencia por `external_sale_id UNIQUE`: reenviar la misma venta
-  reutiliza el resultado, nunca duplica.
-
-#### 3) Integración Loyverse
-
-- **Customer mapping Supabase ↔ Loyverse**: `customers.loyverse_customer_id`;
-  vínculo por email → teléfono → conflicto → crear; actualización
-  conservadora y defensa de concurrencia (migración `0006` + `_shared
-  /syncClaim.js`). Edge `loyverse-customers` (desplegada, `verify_jwt
-  = true`).
-- **Receipts sync**: Edge Function `loyverse-receipts-sync` (cron externo)
-  consulta `GET /v1.0/receipts` (`limit` 250 + `cursor`) dentro de una
-  ventana `updated_at` fija; registra visitas con `register_visit` y
-  revierte con `cancel_visit_by_sale`.
-- **Secret**: header `x-sync-secret` == variable `SYNC_CRON_SECRET`;
-  `verify_jwt = false` en `supabase/config.toml` (la invoca un scheduler,
-  no un usuario).
-- **Ventana máxima de 30 días**: el plan gratuito solo expone receipts de
-  los últimos 31 días; el checkpoint inicial/heredado se clampea a
-  `now - 30 days` (`LOYVERSE_WINDOW_DAYS = 30`) sin regresar avances
-  progresivos.
-- **Checkpoint/watermark**: tabla `loyverse_sync_state`
-  (`updated_at_min`/`updated_at_max`, `cursor`, estado, claim atómico).
-  El watermark solo avanza si la corrida termina sin errores de
-  infraestructura; errores de negocio (`P0001`) se reportan en
-  `conflicts` y no bloquean el avance.
-- **Receipts sin cliente**: se clasifican (`no_customer`,
-  `unmapped_customer`) y se ignoran — nunca se auto-crea un cliente de
-  Salmos a partir de un receipt.
-- **Idempotencia y cancelaciones**: `external_sale_id` UNIQUE; un receipt
-  cancelado sin visita previa es un no-op (`visit_found = false`);
-  ya-cancelado responde `already_cancelled`; reward redimida → conflicto
-  de negocio que no rompe el avance del watermark.
-
-#### 4) Base de datos — migraciones `supabase/migrations/` `0001`–`0011`
-
-| Migración | Propósito (relacionado con loyalty/sync) |
-|---|---|
-| `0001_customers.sql` | `customers` + `customer_sync_events`; RLS por `auth.uid() = auth_user_id` |
-| `0002_loyalty_schema.sql` | `loyalty_cycles`, `loyalty_visits`, `rewards`, `audit_logs`; índices (idempotencia, 1 visita/día); RLS client-select |
-| `0003_auth_alias_rpc.sql` | `resolve_email_for_login` y `phone_is_registered` (login por teléfono sin romper RLS) |
-| `0004_loyverse_updated_event.sql` | Evento `loyverse_updated` de auditoría de la actualización conservadora de clientes |
-| `0005_loyalty_engine.sql` | RPCs `register_visit`, `cancel_visit`, `redeem_reward`, `assert_loyalty_actor`, `visit_summary`; columnas `required_visits`, `source` |
-| `0006_loyverse_sync_claim.sql` | Claim atómico de sync de clientes (`loyverse_sync_claim`/`_at`) |
-| `0007_loyverse_receipts_sync.sql` | `triggered_reward_id`, `cancel_visit_by_sale`, tabla `loyverse_sync_state`; RPCs de `0005` recreadas |
-| `0008_customers_identity_hardening.sql` | Hardening de identidad: índices únicos normalizados de email/teléfono, grants mínimos, vinculación Loyverse server-side |
-| `0009_reward_redemptions.sql` | Evidencia de redenciones detectadas en receipts (`reward_redemptions`), idempotente por receipt+discount |
-| `0010_loyverse_receipt_details.sql` | `loyalty_visits.items` (line_items normalizados) y `loyalty_visits.receipt_date` (fecha REAL del cobro, distinta de `created_at`); RPC `register_visit_with_receipt` |
-| `0011_visit_verse_id.sql` | `loyalty_visits.verse_id` (versículo FIJO por visita) + tabla `bible_verse_pool` (pasajes elegibles); asignación conservada ante re-sync |
-
-#### 5) Frontend
-
-- **Home ahora consume datos reales de Supabase**: `App.jsx` llama
-  `getCardForCustomer(session.customer.profileId || session.customer.id)`
-  — usa el `customers.id` real (`profileId`) en modo real.
-- **`src/services/loyalty/loyaltyService.js`**: `getCardForCustomer` y
-  `getCycleHistory` consultan `customers` + `loyalty_cycles` +
-  `loyalty_visits` (progreso **derivado** de visitas activas, como define
-  el esquema); sintetizan `card` desde `customer_code`. `addVisit`
-  (uso interno del flujo Staff/mock) intacto. Fallback a mockDatabase sin
-  Supabase (demo).
-- **`src/services/loyalty/rewardService.js`**: `getRewardsForCard` (y sus
-  derivadas `getCurrentReward`/`getPastRewards`) leen `rewards` reales por
-  `customer_id`; la expiración se sigue derivando en cliente.
-  `redeemReward` (flujo Staff) intacto. Fallback demo.
-- **`src/App.jsx`**: pasa `profileId` al cargar la lealtad; Renderiza
-  `HomeScreen` con `cycle.visits` / `cycle.requiredVisits` /
-  `currentReward`.
-- **Home muestra actualmente 2/8** para el cliente de prueba Javier.
-
-#### 6) Validaciones realizadas
-
-- **Tests completos: 203/203** (`npm test`) — incluyen las suites de
-  `receipts-sync-core`, `loyalty-engine`, `sync-claim`, `single-flight`,
-  `loyalty`, `loyverse-sync`, `auth`, `navigation` y `psalms`.
-- **Build exitoso**: `npm run build` (solo el aviso preexistente de chunk
-  Vite > 500 kB, ajeno al sync).
-- **Sync real exitoso** Loyverse → Supabase: **el último sync procesó
-  979 receipts** (corrida contra el ambiente real, reportada por el
-  operador del checkpoint).
-- **2 visitas reales registradas** para Javier
-  (`customer_id 896c337f-adcd-4014-81c0-7f4131437d80`, `source =
-  'loyverse'`).
-- **Home refleja 2/8** para el cliente de prueba.
-
-#### 7) Estado actual
-
-**TERMINADO / VALIDADO (este checkpoint):**
-- Motor de lealtad SQL (migraciones `0001`–`0007`) y RPCs transaccionales.
-- Sync de receipts: Edge `loyverse-receipts-sync`, estado/watermark
-  (`loyverse_sync_state`), ventana de 30 días, idempotencia y cancelaciones.
-- Lecturas del cliente (Home y pantallas derivadas) desde Supabase real.
-- Sync de clientes Loyverse (Fase C) desplegado y validado previamente.
-- 203 tests + build verde al día de hoy.
-
-**PENDIENTE:**
-- Migrar las **escrituras** del flujo Staff al motor real
-  (`registerSale`/`cancelSale`/`redeemReward` desde la app sobre las RPCs
-  `register_visit`/`cancel_visit`/`redeem_reward`) y eliminar el DEV
-  bridge (`ensureLoyaltyProfile` + mockDatabase) al cierre de esa
-  migración.
-- Despliegue formal/scheduler de `loyverse-receipts-sync` en el ambiente
-  productivo final (definir el cron que invoque con `x-sync-secret`).
-- QR con token firmado; entregar emails branded (dominio, logo en ruta
-  definitiva, trigger de `welcome.html`).
-- Ventas Loyverse en la UI (Activity ya muestra recompensas reales; las
-  ventas manuales del staff siguen en mock y `ManualSalesAdapter` sigue
-  siendo la única fuente de ventas).
-
-#### 8) Cómo volver a probar el flujo (Loyverse → Supabase → Home)
-
-1. `<npm test>` (esperado 155/155) y `npm run build`.
-2. Invoca la Edge `loyverse-receipts-sync` con `POST` y header
-   `x-sync-secret: <SYNC_CRON_SECRET>`.
-3. Verifica en Supabase: `loyverse_sync_state.last_status = 'ok'`
-   (con `processed` y `window.updatedAtMax`), nuevas filas en
-   `loyalty_visits` (`source = 'loyverse'`, `external_sale_id` =
-   `loyverse_receipt_<store>_<receipt_number>`), y `audit_logs` con
-   `VISIT_ADDED`/`REWARD_EARNED`.
-4. Un receipt cancelado debe producir la reversa vía
-   `cancel_visit_by_sale` (no-op idempotente si nunca se registró).
-5. Abre la app con `.env` real, entra como el cliente de prueba y en `/`
-   confirma el contador (`2/8`) y, si corresponde, `currentReward`.
-
-#### 9) Refinamiento visual — Home / branding
-
-* Commit: `b8c7f66`
-* Se refinó la presentación visual del Home del cliente.
-* Se agregó el slogan oficial: **“Donde el café es un verso al paladar”**, centrado después de la tarjeta digital.
-* Se eliminó el pequeño IconMark/S de la tarjeta, dejando el Wordmark de Salmos Café.
-* Los cambios visuales corresponden a:
-
-  * `src/screens/client/Home.jsx`
-  * `src/styles.css`
-
-#### 10) QA — QR y `customer_code`
-
-* El QR de Salmos utiliza `QRCodeCanvas` (librería `qrcode.react`).
-* El payload del QR es exactamente el `customer_code`.
-* El valor llega por la cadena:
-  `App.jsx` → `QrModal.jsx` → `QrCode.jsx`.
-* En producción real, `cardNumber` proviene de `customer.customer_code`.
-* Ejemplo de payload: `SC-004821`.
-* Se realizó una verificación temporal en `QrCode.jsx` mostrando:
-  `QR payload` y `Customer code`.
-* Ambos valores fueron confirmados idénticos.
-* El diagnóstico es TEMPORAL y será retirado después del QA.
-* Tests: `155/155` pass.
-* Build: OK; únicamente permanece el warning preexistente de chunk >500 kB.
-* No se modificó la lógica de generación del QR.
-
-## Project Status
-
-- **En desarrollo activo.**
-- ✅ Base funcional: app + motor de fidelización real (reglas verificadas por tests).
-- ✅ Autenticación de cliente en Supabase (correo/teléfono + contraseña, OTP solo para recuperación, Google).
-- ✅ Sincronización Loyverse: crear, vincular y **actualizar conservadoramente** a clientes existentes (Fase C — desplegado y validado en producción).
-- ✅ **Navegación real por URL** (`/`, `/Staff`, `/Admin`) y **UI de Cliente/Auth limpia** (sin selector de demo; login "Bienvenido"; icono de Google).
-- ✅ **Desplegado y validado en producción**: migraciones `0001`–`0006` aplicadas en el ambiente real y Edge Function `loyverse-customers` activa (`verify_jwt = true`).
-- ✅ **Corrección de concurrencia Loyverse** validada con QA real: 2 invocaciones simultáneas → solo una procede; la perdedora responde `409 loyverse_sync_in_progress` (retriable) sin crear cliente duplicado.
-- ✅ **Sync de receipts Loyverse** (Fase D2-v1): migración `0007` + Edge `loyverse-receipts-sync` (secret `x-sync-secret`, watermark en `loyverse_sync_state`, ventana de 30 días, idempotencia y cancelaciones) validado con sync real. Migraciones `0009`/`0010`/`0011` añaden evidencia de redención, detalle del ticket (`items`/`receipt_date`) y versículo por visita (`verse_id`). QA 2026-09-15: **297 receipts** procesados, **4 visitas** registradas/reconstruidas.
-- ✅ **Lecturas reales del Cliente**: Home y pantallas derivadas leen tarjeta/ciclo/visitas/recompensas directamente de Supabase (RLS) — `loyaltyService`/`rewardService` con fallback demo.
-- ✅ **Templates de email branded** para Supabase Auth en `email-templates/` (confirm-signup, reset-password, otp, change-email, welcome) + scripts `scripts/build-templates-payload.py` y `scripts/patch-email-templates.ps1`; el sistema legacy `supabase/templates/` fue eliminado.
-- ✅ **Variables de entorno documentadas** en `.env.example`: SMTP custom (`SMTP_HOST`/`SMTP_PORT`/`SMTP_USER`/`SMTP_PASS`/`SMTP_ADMIN_EMAIL`/`SMTP_SENDER_NAME`) y Google OAuth (`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`). Los secretos reales **jamás** se guardan en Git y `.env` permanece gitignored.
-- ⏳ Siguiente paso: migrar el **motor de escrituras** (ventas Staff, canje, cancelación) a las RPCs transaccionales reales; las lecturas del cliente ya son reales.
-
-## Development Status
-
-| Fase | Estado | Contenido |
-|---|---|---|
-| Fase A — Foundation | ✅ | Estructura de la app, arquitectura `services/`, reglas de lealtad (sobre mock) |
-| Fase B — Authentication | ✅ | Supabase Auth real de cliente |
-| Fase C — Loyverse Sync | ✅ | Crear/vincular/actualizar clientes sin duplicados, incl. claim atómico de concurrencia (código + tests + despliegue + QA real) |
-| Fase D — Loyalty | ~ | Motor SQL real (migraciones `0005`/`0007`) + **lecturas del Cliente reales (Home/Perfil)** + sync de receipts; pendiente: escrituras Staff sobre las RPCs |
-| Fase E — Sales / POS | ⏳ | `ManualSalesAdapter` hoy; ventas Loyverse no conectadas |
-| Fase F — Dataset de Salmos | ✅ | Dataset local de 150 pasajes RVR1960 (`bible-verses.json`), capa de acceso `psalms.js`, `TicketVerse` activo en el ticket de fidelidad; `DailyVerse` disponible pero oculto del Home por decisión de diseño |
-
-## Roadmap
-
-- Foundation ✅
-- Authentication ✅
-- Loyverse integration ✅
-- Loyverse customer sync ✅
-- Branded email templates ✅
-- Loyalty engine ⏳ (~SQL real + lecturas; escrituras Staff pendientes)
-- Customer loyalty experience ⏳ (Home real; QR firmado pendiente)
-- Dataset de Salmos (contenido bíblico local) ✅
-- Sales / POS integration ⏳
-- Production hardening ⏳
-
-## Dataset de Salmos — contenido bíblico local
-
-La aplicación consume un dataset **local y offline** de pasajes de Salmos
-en español (RVR1960), sin depender de ninguna API, GitHub o red en runtime.
-
-- **Archivo**: `src/data/bible-verses.json` — 150 pasajes, 19 categorías,
-  textos RVR1960 completos (ver `docs/psalms-dataset.md`).
-- **Capa de acceso**: `src/lib/psalms.js` — funciones puras sobre el JSON
-  (`getDailyPassage`, `getDailyShortPassage`, `getPassagesByTag`, etc.).
-- **Ticket de fidelidad** (`TicketVerse`): un pasaje corto (≤ 160 chars,
-  ≤ 3 líneas) se renderiza automáticamente dentro de cada ticket impreso,
-  entre la sección de visitas/progreso y el código de barras. La selección
-  es determinística por fecha y nunca trunca texto.
-- **`DailyVerse`**: componente de pasaje visible en Home (con tags). El
-  componente existe y la funcionalidad está disponible, pero actualmente
-  está **oculto del Home por decisión de diseño**.
-- **Sin dependencia externa**: todo vive en el JSON local. El repositorio
-  `mrk214/bible-data-es-spa` se usó una sola vez como herramienta de
-  extracción; no forma parte del runtime.
-- **Derechos RVR1960**: Texto RVR1960 © Sociedades Bíblicas Unidas.
-
-Ver también: `tests/psalms.test.mjs` (suite de tests de la capa de acceso).
-
-## Tech Stack
-
-- **React 18 + Vite 6** (SPA)
-- **Supabase**: Auth · PostgreSQL 17 · Edge Functions (Deno)
-- **Loyverse API (v1.0)** — solo server-side, desde la Edge Function
-- **Tests**: test runner nativo de Node (`node --test`)
-
-## Reglas de negocio implementadas
-
-- Compra mínima válida: **$50 MXN**.
-- Máximo **1 visita válida por cliente por día** (across ambas sucursales).
-- Recompensa en la **8ª visita**, hasta **$150 MXN**.
-- La recompensa **vence a los 3 meses** — se deriva en `rewardService`
-  (`available` + `now > expiresAt` → `expired`), nunca depende de un cron.
-- Cancelar una venta **revierte la visita**; si esa venta generó la 8ª
-  visita, la recompensa se invalida y el ciclo se reabre. Si la
-  recompensa ya fue redimida, la cancelación se **bloquea sin modificar
-  nada**.
-- **Idempotencia** por `externalSaleId`: reenviar la misma venta reutiliza
-  el resultado, nunca duplica la visita.
-- Dos sucursales (`branch_1`, `branch_2`) comparten la misma
-  tarjeta/ciclo del cliente.
-
-Ver `tests/loyalty.test.mjs`, `tests/loyverse-sync.test.mjs` y
-`tests/auth.test.mjs` para las reglas verificadas (correr con `npm test`).
-
-## Tests / calidad
-
-- **223 tests pasando** (`npm test`): motor de lealtad (`loyalty`),
-  sincronización de clientes Loyverse (`loyverse-sync`), sync de receipts
-  (`receipts-sync-core`), motor SQL (`loyalty-engine`), claim atómico
-  (`sync-claim`), single-flight, flujo de auth, navegación por pathname,
-  dataset local de Salmos (`psalms`), detalle del ticket (`code128`),
-  asignación de versículos (`verse-assignment`) y orden cronológico de
-  visitas (`visit-ordering`).
-- `npm run build` compila sin errores (hay un aviso **preexistente** de
-  tamaño de chunk de Vite > 500 kB, no introducido por el sync).
-- `npm audit` reporta **0 vulnerabilidades**.
-- Los scripts de email templates (`scripts/build-templates-payload.py` y `scripts/patch-email-templates.ps1`, con `-DryRun` / `-ValidateRemoteTemplate`) validan de forma determinista que el payload enviado a Supabase coincide byte a byte con `email-templates/` y los subjects de `supabase/config.toml` (ver sección Email templates).
-
-## Cómo correrlo
-
-```bash
-npm install
-npm run dev
-npm test        # motor de fidelización + sync Loyverse, sin navegador
-```
-
-Abre la URL que imprime Vite. Cada experiencia se elige por la URL,
-**no por un selector**: `/` es **Cliente**, `/Staff` es **Staff** y
-`/Admin` es **Admin** (la SPA resuelve la primera ruta del pathname, sin
-dependencia de router). En producción son experiencias separadas, cada
-una con su propio guard de autenticación.
-
-Sin `.env`, el cliente corre en **modo demo** (auth mock en memoria).
-Con `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` en `.env`, el registro
-y login pasan a **Supabase Auth real** (ver sección de config debajo).
-
-## Autenticación y sincronización con Loyverse
-
-Fase 1 (completa): auth real de **cliente** sobre Supabase Auth (correo o
-teléfono + contraseña), OTP **solo** como recuperación de contraseña, Google
-como opción de acceso, y vínculo automático con el cliente correcto de
-Loyverse, sin duplicados.
-
-- `signUpWithEmail` → registro con **correo + contraseña** (el email es la
-  identidad; el teléfono es opcional: contacto + alias de login). Si el
-  proyecto tiene `email confirmations = on`, la cuenta queda pendiente hasta
-  confirmar desde el correo.
-- `signInWithPassword` → login con **correo o teléfono + contraseña**. El
-  teléfono se resuelve al email de la cuenta con la función segura
-  `resolve_email_for_login` (migración `0003`, SECURITY DEFINER) para no romper
-  RLS; la validación de la contraseña la hace SIEMPRE GoTrue (Supabase), nunca
-  esa función.
-- `forgotPasswordStart/Verify/Resend` + `setNewPassword` → recuperación por
-  **código al correo** (OTP). Sin proveedor SMS configurado, el código siempre
-  va al correo, incluso si pides la recuperación con tu teléfono.
-- `signInWithGoogle` → OAuth; la sesión llega por redirect
-  (`detectSessionInUrl`). Un correo ya registrado con contraseña no se pisa:
-  se reporta conflicto amigable y se invita a iniciar sesión con credenciales.
-- Cada alta de sesión asegura la fila `customers` (con `customer_code`
-  `SC-XXXXXXXX` como token QR) y dispara la sincronización Loyverse **solo a
-  través de la Edge Function** — nunca directo.
-- `retryLoyverseSync` re-dispara la sync desde el perfil/Home si quedó
-  "failed" (banner "Reintentar sincronización" en modo real).
-- Staff y Admin siguen siendo mock en esta fase (su auth real es un paso
-  posterior).
-
-Los errores de Supabase se traducen a mensajes amigables en español en
-`src/services/auth/authErrors.js` (códigos + frase); la UI nunca muestra
-errores crudos del servidor.
-
-### Diagrama de flujo (clientes)
-
-```
-UI ── authService/ ──► Supabase Auth ──► customers (Postgres, RLS)
-     (facade)        (registro/login)      │
-                                          ▼
-Edge Function loyverse-customers ──► api.loyverse.com  (LOYVERSE_ACCESS_TOKEN
-     (JWT del usuario, RLS)             /v1.0/customers  SOLO aquí, en el server)
-```
-
-El navegador **nunca** llama a `api.loyverse.com`; `LOYVERSE_ACCESS_TOKEN`
-no es una `VITE_*` y necesariamente vive en la Edge Function.
-
-### Configuración (Supabase + Loyverse)
-
-1. Crea un proyecto en Supabase y copia `.env.example` a `.env`:
-   ```
-   VITE_SUPABASE_URL=https://TU-PROYECTO.supabase.co
-   VITE_SUPABASE_ANON_KEY=<tu anon key pública>
-   VITE_LOYVERSE_CUSTOMERS_FUNCTION_URL=   # opcional
-   LOYVERSE_ACCESS_TOKEN=<token Loyverse con lectura/escritura>
-   ```
-2. Aplica las migraciones `supabase/migrations/0001_customers.sql`,
-   `0002_loyalty_schema.sql`, `0003_auth_alias_rpc.sql`,
-   `0004_loyverse_updated_event.sql`, `0005_loyalty_engine.sql`,
-   `0006_loyverse_sync_claim.sql` y `0007_loyverse_receipts_sync.sql`
-   (`supabase db push` o pégalas en el SQL Editor en orden).
-3. Despliega las Edge Functions:
-   ```
-   supabase functions deploy loyverse-customers
-   supabase functions deploy loyverse-receipts-sync
-   ```
-   (variables `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `LOYVERSE_ACCESS_TOKEN`
-   y `SYNC_CRON_SECRET` configuradas en el proyecto — los tokens/secretos
-   jamás en el frontend). `loyverse-receipts-sync` se invoca por un cron
-   con el header `x-sync-secret` (ver sección "Probar el flujo" del
-   checkpoint).
-4. En Authentication → Providers habilita **Email** (y Google si quieres
-   acceso con OAuth). El proveedor **Phone/SMS queda apagado**: la
-   recuperación de contraseña usa el correo.
-
-### Variables de entorno (`.env` / `.env.example`)
-
-`.env.example` está commiteado y documenta **todas** las variables con
-placeholders; los valores reales viven solo en `.env`, que está **gitignored**:
-
-- **Frontend (públicas):** `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`,
-  `VITE_LOYVERSE_CUSTOMERS_FUNCTION_URL` (opcional).
-- **Edge Functions (SOLO server, jamás `VITE_*`):** `LOYVERSE_ACCESS_TOKEN`
-  (cliente/ventas) y `SYNC_CRON_SECRET` (secreto del scheduler que envían
-  los cron al header `x-sync-secret` de `loyverse-receipts-sync`).
-- **SMTP custom (Supabase Auth):** `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`,
-  `SMTP_PASS`, `SMTP_ADMIN_EMAIL`, `SMTP_SENDER_NAME` — activan el bloque
-  `[auth.email.smtp]` (comentado en `config.toml` hasta tener proveedor/dominio).
-- **Google OAuth (Supabase Auth):** `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
-  — activan `[auth.external.google]` (comentado en `config.toml`); credenciales
-  desde Google Cloud Console.
-
-Regla de la Edge Function (en `supabase/functions/_shared/loyverseCore.js`,
-probada unitariamente): busca por email → busca por teléfono (la API de
-Loyverse **no** filtra por `phone_number`, así que se página y filtra) →
-vincula si coincide con uno solo → **conflicto** si email y teléfono
-apuntan a clientes distintos (no crea un tercero) → crea solo si no
-existe, con `customer_code` como nombre estable e idempotente.
-
-### Sincronización de clientes existentes (Fase C)
-
-Además de crear y vincular, la sincronización **actualiza** de forma
-conservadora a los clientes que ya existen en Loyverse:
-
-- Se busca por email y/o teléfono y se vincula al cliente correcto **sin
-  duplicados**.
-- Los **campos permitidos que faltan** en Loyverse (nombre, email,
-  teléfono, `customer_code`) se sincronizan desde Salmos.
-- La actualización es **conservadora**: nunca sobrescribe un valor distinto.
-  Un email o teléfono **distinto** en el cliente existente **bloquea** el
-  vínculo con un conflicto de identidad (el cliente es dirigido a entrar con
-  esa cuenta o a recuperar su contraseña y vincular correo y teléfono).
-- Datos del POS (`total_visits`, `total_spent`, `total_points`, recibos)
-  permanecen **intocables**.
-- Cada actualización real queda **auditada** y el flujo es **idempotente**
-  (reintentos no duplican ni tocan nada que ya coincida).
-- **Defensa de concurrencia server-side (0006 + `_shared/syncClaim.js`)**: la
-  Edge adquiere un **claim atómico por fila** (`loyverse_sync_claim` +
-  `loyverse_sync_claim_at`) antes de tocar la API; una segunda invocación
-  simultánea del mismo perfil responde `409 loyverse_sync_in_progress`
-  (`retriable: true`) sin llegar a Loyverse, y el claim se libera al terminar
-  (lease de 10 min para claims abandonados; liberación solo por el token
-  dueño). El guard **single-flight** del frontend sigue siendo la primera
-  barrera (una sola llamada remota por perfil).
-
-## Email templates de Supabase Auth (branded)
-
-Los correos que envía Supabase Auth usan plantillas propias con la identidad de
-Salmos Café (diseño en `docs/SALMOS_EMAIL_DESIGN.md`; auditoría en
-`docs/AUTH_AUDIT.md`). La **fuente única** vive en `email-templates/` en la raíz
-del repo y se mapea a los type keys nativos en `supabase/config.toml`
-(`content_path` resuelto relativo a la raíz del repo):
-
-| Type key de Supabase | Archivo | Uso |
-|---|---|---|
-| `confirmation` | `email-templates/confirm-signup.html` | Confirma el correo al registrarse |
-| `recovery` | `email-templates/reset-password.html` | Link para restablecer contraseña |
-| `magic_link` | `email-templates/otp.html` | Código **OTP de 6 dígitos** (`{{ .Token }}`, sin link) — es el correo real de la recuperación de la app (`signInWithOtp`) |
-| `email_change` | `email-templates/change-email.html` | Confirma el cambio de correo |
-| *(sin trigger nativo)* | `email-templates/welcome.html` | Bienvenida — envío **PENDIENTE MANUAL** (hook / Edge Function / proveedor de email) |
-
-- Logo: `email-templates/assets/wordmark-cream.png` (único binario). Los 5
-  templates usan la misma **URL provisional unificada**
-  `https://raw.githubusercontent.com/salmoscafe/salmos-cafe-loyalty/main/email-templates/assets/wordmark-cream.png`
-  (comentario `[LOGO_URL_PROVISIONAL]` en cada HTML); al publicar el dominio se
-  hospeda el PNG en `https://salmos-cafe.com/email-assets/{...}` y se retiran
-  los comentarios. No se usa ruta relativa en emails de Supabase.
-- Footer de marca: eslogan **"Donde el café es un verso al paladar."** en las 5
-  plantillas; asuntos y preheaders según diseño.
-- Las plantillas legacy
-  `supabase/templates/{confirmation,email_change,magic_link,recovery,welcome}.html`
-  fueron **eliminadas** — `supabase/templates/` ya no existe.
-
-Scripts (en `scripts/`):
-
-- `build-templates-payload.py` — construye el payload de las **8 claves**
-  (`mailer_templates_*_content` + `mailer_subjects_*`) leyendo los archivos
-  exactos (UTF-8 sin BOM, aborta si hay BOM) de `email-templates/` y los
-  subjects de `supabase/config.toml`. Modo `--out <json>` escribe el payload;
-  en solitario imprime el reporte con SHA-256 por archivo.
-- `patch-email-templates.ps1` — PATCH parcial y verificado a
-  `https://api.supabase.com/v1/projects/<ref>/config/auth` con **solo** esas 8
-  claves (regex de bloqueo: rechaza cualquier otra key de auth). Autentica con
-  el token del Credential Manager de Windows (`Supabase CLI:supabase`, leído
-  solo en memoria, jamás impreso). Flags: `-DryRun` (valida sin red),
-  `-ValidateRemoteTemplate` (GET **solo lectura** que compara el template
-  remoto con `confirm-signup.html`: longitudes, SHA-256 y match exacto),
-  `-Diagnose`, `-Ref <project-ref>`.
-
-Para el envío branded en remoto, el proyecto real tiene **SMTP custom
-configurado**: `smtp.gmail.com:587`, remitente "Salmos Café", con
-`smtp_user`/`smtp_pass`/`smtp_admin_email` presentes — confirmado con un **GET
-de solo lectura a la Management API**. Es configuración remota; no implica
-**entrega verificada** en este checkpoint. En local, el bloque
-`[auth.email.smtp]` de `config.toml` sigue comentado y sus valores solo se
-definen en `.env` (gitignored); los secretos reales nunca se suben a Git. Gmail
-exige **App Password** para SMTP, no la contraseña de la cuenta.
-
-## Seguridad
-
-- El token de Loyverse vive **solo server-side** (Edge Function); el
-  navegador nunca llama a `api.loyverse.com`.
-- Crear/actualizar clientes ocurre **dentro de la Edge Function**, autenticada
-  con el JWT del usuario (`verify_jwt`).
-- **RLS activo**: cada usuario solo accede a su fila en Postgres.
-- No se exponen secretos ni datos sensibles al frontend; los errores se
-  traducen a mensajes amigables.
-
-## Deployment (aplicado)
-
-El cierre de despliegue de la Fase C y el hardening de concurrencia **ya se
-aplicaron al ambiente real**:
-
-1. Migraciones aplicadas en remoto: `0001`–`0007` (incluye `0004`
-   `loyverse_updated`, `0006` del claim atómico de sync y `0007` del sync
-   de receipts), más `0009`/`0010`/`0011` (redevención, detalle del ticket
-   y versículo por visita) probadas en el QA 2026-09-15.
-2. Edge Function `loyverse-customers` desplegada y activa (`verify_jwt =
-   true`) con `_shared/syncClaim.js` y `loyverseCore.js` actualizado.
-3. `loyverse-receipts-sync` **validada con corridas reales** (QA 2026-09-15:
-   297 receipts procesados y 4 visitas reconstruidas; checkpoint en
-   `loyverse_sync_state`). El **scheduler/cron formal** que la invoque con
-   `x-sync-secret` sigue pendiente de definirse en el ambiente productivo.
-
-Comportamiento de concurrencia en producción: dos invocaciones simultáneas del
-mismo perfil → la primera adquiere el claim de `customers`
-(`loyverse_sync_claim`, lease de 10 min) y continúa; la segunda responde
-`409 loyverse_sync_in_progress` (`retriable: true`) sin llamar a la API de
-Loyverse. Un perfil ya `synced` responde `already_linked` sin tocar el claim.
-El claim se libera al terminar (solo por el token dueño) y el fix `b0351f5`
-sigue re-buscando ante un error de duplicado al crear.
-
-## Credenciales de la demo
-
-- **Cliente:** `javier@example.com` — contraseña `demo1234`.
-  También puedes entrar con el teléfono `+52 664 123 4567` + `demo1234`.
-  OTP de recuperación (demo): `123456` válido · `000000` vencido.
-- **Staff:** PIN `1234` (Ana Beltrán), `5678` (Marco Reyes) o `2468`
-  (Luisa Padilla).
-- **Admin:** PIN `9999` (Diana Salazar) — el modo Admin en sí no pide
-  login todavía (Fase 2).
-- **Escáner de Staff:** el campo "Simular escaneo" viene precargado con
-  `SC-004821`, la tarjeta de Javier.
-
-## Estructura
-
-```
-src/
-  data/mockDatabase.js     "backend falso": customers, cards, branches,
-                            loyalty_cycles, sales, rewards, staff_profiles,
-                            audit_logs
-  data/bible-verses.json   dataset local de 150 pasajes RVR1960 (Salmos),
-                            19 tags, ~28k chars; fuente única de contenido
-                            bíblico (sin API en runtime)
-  services/                motor de fidelización real; única puerta de
-                            entrada a los datos; cada método es async
-    index.js               BARREL ÚNICO — las pantallas importan SOLO desde aquí
-    auth/                  facade authService (Supabase real ↔ mock demo) +
-                           authErrors (traducción de errores a mensajes amigables)
-    loyalty/               loyaltyService + rewardService (lecturas reales en
-                           Supabase con fallback demo; reglas 8ª visita,
-                           expiración, canje, cancelación)
-    sales/                 salesService (único punto de entrada de ventas),
-                            salesAdapters (ManualSalesAdapter hoy; Loyverse
-                            después), ticketService
-    customers/             customerService (perfil y búsqueda por token)
-    staff/                 staffService (PIN, sesión, permisos) — mock ahora
-    admin/                 adminService (dashboard, métricas por sucursal)
-    loyverse/              loyverseEdgeClient (única puerta a la Edge Function,
-                            el token NUNCA llega al navegador) +
-                            loyverseCustomerService (normalización)
-  components/
-    common/                ui, BrandMark, icons — piezas visuales puras
-    layout/                BottomNav, QrModal, QrCode — estructura de pantalla
-    auth/                  piezas del flujo AuthScreen (login/registro/
-                           recuperación por OTP/provisioning)
-    loyalty/               StampTrack, SyncBanner, DailyVerse
-                           (DailyVerse disponible; oculto del Home)
-    activity/              TicketVerse (versículo persistido por visita),
-                           ReceiptPrinter (detalle POS del ticket),
-                           Code128Barcode (código de barras real del ticket)
-  screens/client/          Home, Recompensas, Actividad, Perfil, Configuración
-  screens/staff/           Home, Escanear, Cliente encontrado,
-                            Registrar venta (con sucursal), Confirmación, Actividad
-  screens/admin/           Dashboard (con desglose por sucursal), Clientes + stubs
-  lib/
-    supabase/client.js     ÚNICA creación del cliente Supabase (null en demo)
-    utils/env.js           única lectura del entorno (Vite / tests)
-    phone.js               teléfonos E.164 +52 (normalización, validación)
-    delay.js               util de pausa simulada
-    navigation.js          resolución de experiencia por pathname (/ /Staff /Admin)
-    psalms.js              funciones puras sobre bible-verses.json
-                           (getDailyPassage, getDailyShortPassage,
-                           getPassagesByTag, getAllTags, etc.)
-    ticketVerse.js         resolución del pasaje del ticket: verse_id
-                           persistido o versículo del día como fallback
-    saleOrdering.js        orden cronológico de visitas para Activity
-                           (receipt_date → visit_date → created_at)
-    code128.js             generación de código de barras Code 128
-    receiptPdf.js          exportación del ticket a PDF
-  App.jsx                  orquestador raíz + resolución de experiencia por URL
-  styles.css               identidad visual completa (paleta real del logo)
-tests/loyalty.test.mjs              suite del motor de fidelización (node --test)
-tests/loyalty-engine.test.mjs       RPCs del motor SQL (register/cancel/redeem, idempotencia)
-tests/loyverse-sync.test.mjs        lógica de sync Loyverse (normalización y conflicto)
-tests/receipts-sync-core.test.mjs   lógica pura del sync de receipts (external_sale_id, cancelaciones)
-tests/sync-claim.test.mjs           claim atómico de concurrencia (lease, token, liberación)
-tests/single-flight.test.mjs        guard single-flight del frontend
-tests/auth.test.mjs                 suite del flujo de auth (contraseña + recuperación OTP)
-tests/navigation.test.mjs           suite de navegación por pathname (sin router)
-tests/psalms.test.mjs                suite del dataset local de Salmos (getPassageById,
-                                     getPassagesByTag, getDailyPassage,
-                                     getDailyShortPassage, inmutabilidad)
-tests/code128.test.mjs              suite de generación/codificación Code 128
-tests/verse-assignment.test.mjs     regla de asignación/conservación de verse_id
-tests/visit-ordering.test.mjs       orden de visitas y progreso cronológico (receipt_date)
-
-email-templates/            fuente única de las 5 plantillas de email branded
-  confirm-signup.html       type key `confirmation`
-  reset-password.html       type key `recovery`
-  otp.html                  type key `magic_link` → OTP de 6 dígitos ({{ .Token }})
-  change-email.html         type key `email_change`
-  welcome.html              bienvenida (sin trigger nativo)
-  assets/wordmark-cream.png logo (único binario; URL provisional en los 5 HTML)
-
-scripts/
-  build-templates-payload.py    construye el payload de 8 claves (config.toml + email-templates/)
-  patch-email-templates.ps1     PATCH parcial verificado a Supabase (token vía Credential Manager)
-
-supabase/
-  config.toml                          subjects + content_path de templates (fuente única: email-templates/)
-  migrations/                          0001–0011 (esquema, RPCs, loyalty_engine, sync_claim,
-                                        loyverse_sync_state, detalle del ticket 0010,
-                                        versículo por visita 0011, redenciones 0009)
-  functions/_shared/loyaltyEngineCore.js
-  functions/_shared/syncClaim.js       claim atómico por fila
-  functions/_shared/receiptsSyncCore.js lógica pura compartida del sync de receipts
-  functions/loyverse-customers/        Edge Function (verify_jwt = true) — sync de clientes
-  functions/loyverse-receipts-sync/    Edge Function (verify_jwt = false, x-sync-secret) — sync de receipts
-  functions/send-ticket/               Edge Function (verify_jwt = true) — envío del ticket por correo
-  functions/loyalty-engine/            función del motor de lealtad (escrituras, ver Roadmap)
-  templates/                           ELIMINADO — reemplazado por email-templates/ (raíz del repo)
-```
-
-## Regla que gobierna todo el código
-
-**El cliente nunca incrementa sus propias visitas.** `loyaltyService.addVisit`
-es de uso interno; el único camino público es `salesService.registerSale()`
-(Staff). Cancelar y redimir siguen la misma regla — ambas operaciones las
-confirma Staff, nunca el cliente.
-
-## Cómo crecer el código (convención)
-
-1. Las pantallas (screens y componentes de pantalla) importan **solo** desde
-   `services/index.js`. Nunca desde `mockDatabase`, `supabase/client` ni un
-   servicio suelto.
-2. Los servicios son async y viven en `services/<dominio>/`; cada archivo una
-   sola responsabilidad. Internamente pueden importarse entre sí (p. ej.
-   `customerService` reusa `currentCycleForCard` de `loyaltyService`).
-3. Todo lo relacionado con Loyverse entra por `loyverse/loyverseEdgeClient.js`
-   (Edge Function) y sale normalizado por `loyverseCustomerService.js`.
-4. El entorno se lee solo con `readEnv` desde `lib/utils/env.js`.
-5. Los componentes se clasifican por su función: `common/` (puros),
-   `layout/` (estructura de app), `auth/` y `loyalty/` (dominio visual).
-
-## Qué es real y qué sigue siendo mock
+## A. Qué es Salmos Café Loyalty App
+
+Programa de lealtad de **Salmos Café**: una SPA (React + Vite) con tres
+experiencias por URL — **Cliente** (`/`), **Staff** (`/Staff`) y **Admin**
+(`/Admin`). Cada compra elegible suma una visita y la **7ª visita** del ciclo
+gana una recompensa (una bebida o hasta **$150 MXN**).
+
+La cuenta del cliente vive en **Supabase** (Auth + PostgreSQL 17 + Edge
+Functions) y se sincroniza con el registro de clientes del **POS Loyverse**
+(crear, vincular y actualizar) sin duplicados. Los **receipts** de Loyverse se
+sincronizan vía Edge Function y generan/revientan visitas con reglas de
+negocio reales en Postgres.
+
+Un rasgo distintivo: cada ticket de fidelidad incluye un **versículo de
+Salmos** (RVR1960, dataset local de 150 pasajes, sin red en runtime) y un
+**código de barras Code 128** real, con exportación a PDF y envío por correo.
+
+No es un proyecto de demostración ni un scaffold: la base, la
+autenticación de cliente y la sincronización con Loyverse (clientes y
+receipts) están implementadas y verificadas. **No está "production
+complete"** (ver secciones N y O).
+
+## B. Estado actual del proyecto
+
+- **Regla de lealtad vigente: 7 visitas** (migración `0012`). Histórica: 8
+  visitas (ver sección P).
+- **Lecturas del cliente (Home, Recompensas, Actividad, Perfil,
+  Configuración) consumen datos reales de Supabase** (RLS: solo lo suyo).
+  El progreso de la tarjeta se **deriva** de `loyalty_visits` (no hay
+  contador almacenado); el estado `expired` también se deriva en lectura.
+- **Motor de escrituras del flujo Staff** (registrar venta manual, canjear,
+  cancelar desde la app): **sigue sobre mock** (`mockDatabase`), a la espera
+  de migrarlo a las RPCs transaccionales reales (`register_visit` /
+  `cancel_visit` / `redeem_reward`).
+- **Sync de receipts Loyverse**: real (Edge `loyverse-receipts-sync`,
+  invocada por un scheduler/cron externo con `x-sync-secret`).
+- **Auth Staff/Admin**: mock (PIN). **Auth Cliente**: Supabase Auth real.
+- **Migraciones `0001`–`0012`** presentes localmente. El estado **remoto**
+  del proyecto Supabase quedó **pendiente de revalidación** en esta auditoría
+  (ver sección G); se documenta sin afirmar verificaciones no reproducidas.
+- QA 2026-09-15 (histórico): 297 receipts procesados, 4 visitas
+  reconstruidas para el cliente de prueba (order `4 → 3 → 2 → 1` en
+  Actividad).
+
+### Qué es real y qué sigue siendo mock (resumen)
 
 | Pieza | Estado |
 |---|---|
-| Motor de fidelización (monto mínimo, límite diario, 8ª visita, expiración, cancelación/reversión, idempotencia) | Real — reglas en Postgres (RPCs `0005`/`0007`) + `services/`, cubierto por tests |
-| Datos de lealtad — **lecturas del cliente** (tarjeta, ciclo, visitas, recompensas) | Real (Postgres, RLS) — Home/Recompensas/Actividad/Perfil; QA 2026-09-15: 4 visitas reconstruidas (4 → 3 → 2 → 1) |
-| Datos de lealtad — **escrituras** (venta manual, canje, cancelación desde la app) | Mock — pendiente migrar a las RPCs transaccionales (`register_visit`/`cancel_visit`/`redeem_reward`) y eliminar `ensureLoyaltyProfile`/`mockDatabase` |
-| Sync de receipts Loyverse | Real — Edge `loyverse-receipts-sync` (secret, ventana 30 días, watermark `loyverse_sync_state`); QA 2026-09-15: 297 receipts procesados y 4 visitas registradas con `receipt_date`/`items`/`verse_id`; scheduler cron formal pendiente |
-| Detalle del ticket (Activity → recibo) | Real — `loyalty_visits.items/receipt_date` (0010) + `verse_id` (0011); `ReceiptPrinter` renderiza items reales, fecha del recibo, progreso y versículo persistido; PDF (Code 128) y envío por correo (`send-ticket`) disponibles (SMTP pendiente para el envío real) |
-| Auth Cliente (correo/teléfono + contraseña; OTP solo recuperación; Google; sesión persistente, Supabase) | Real, con `.env`; demo mock sin `.env` (facade `authService`) |
-| Perfil `customers` + `customer_code` | Real (Postgres, RLS) cuando está configurado |
-| Sync Loyverse (crear/vincular/actualizar clientes sin duplicar, con reintento, conflicto de identidad y auditoría `loyverse_updated`) | Real vía Edge Function desplegada (`verify_jwt = true`); migraciones `0001`–`0007` aplicadas en remoto; concurrencia validada en el ambiente real |
-| Email templates de Auth (branded) | Real — 5 plantillas en `email-templates/`, cableadas en `config.toml`; `welcome` sin trigger nativo (envío PENDIENTE MANUAL) |
-| SMTP custom / envío de correos | **Configurado en remoto** (verificado con GET de solo lectura a la Management API: `smtp.gmail.com:587`, remitente "Salmos Café", user/pass/admin presentes); entrega real **no verificada** en este checkpoint. En local, bloque `[auth.email.smtp]` comentado en `config.toml`; valores solo en `.env` (gitignored) |
-| Auth Staff / Admin | Mock (PIN) |
-| QR | Visual únicamente — `customer_code` sirve hoy de token; firmado en Fase 2 |
-| Tickets/email | Fuera de alcance de V1 (decisión de negocio) — `tickets` queda como tabla/punto de extensión sin usar |
-| Apple/Google Wallet | Solo el botón, sin integración |
-| Loyverse en ventas | No conectado — `ManualSalesAdapter` es la única fuente hoy |
-| Admin: Dashboard y Clientes | Reales contra el mock |
-| Admin: Ventas, Recompensas, Staff, Configuración | Stubs navegables |
+| Lecturas del Cliente (tarjeta, ciclo, visitas, recompensas, ticket + versículo) | Real (Postgres, RLS) |
+| Escrituras del Cliente | El cliente nunca escribe sus visitas (regla de diseño) |
+| Motor de lealtad (reglas en Postgres: RPCs `0005`/`0007`/`0010`, `0012`) | Real |
+| Escrituras Staff desde la app (venta manual, canjear, cancelar) | Mock — pendiente migrar a las RPCs |
+| Sync de clientes Loyverse (crear/vincular/actualizar) | Real (Edge Function, service_role) |
+| Sync de receipts Loyverse | Real (Edge Function, cron externo) |
+| Auth Cliente (email/teléfono + contraseña, OTP recuperación, Google) | Real con `.env`; demo mock sin `.env` |
+| Auth Staff/Admin | Mock (PIN) |
+| QR | Visual — `customer_code` sirve hoy de token; firmado pendiente |
+| Email templates de Auth (branded) | Real en `email-templates/`; envío `welcome.html` sin disparador |
+| SMTP (Auth y send-ticket) | Config definida; entrega real pendiente (SMTP en el entorno de la Edge) |
+| Admin Dashboard y Clientes | Reales contra el mock |
+| Admin Ventas/Recompensas/Staff/Config | Stubs navegables |
+| Loyverse en ventas (UI) | No conectado — `ManualSalesAdapter` es la única fuente |
 
-## Siguiente paso (no incluido aquí)
+## C. Arquitectura
 
-Migrar las **escrituras Staff** al motor transaccional real
-(`registerSale`/`cancelSale`/`redeemReward` desde la app sobre las RPCs
-`register_visit`/`cancel_visit`/`redeem_reward`) y eliminar el DEV bridge
-(`ensureLoyaltyProfile` + `mockDatabase`) al cierre de esa migración;
-definir el **scheduler cron** de `loyverse-receipts-sync` en el ambiente
-productivo; QR con token firmado (con `LoyverseSalesAdapter` cuando haya
-acceso real a ventas). En paralelo, cerrar la entrega de los emails
-branded en producción: publicar el dominio, hospedar
-`wordmark-cream.png` en su ruta definitiva y retirar los comentarios
-`[LOGO_URL_PROVISIONAL]` (y decidir el disparador de `welcome.html`).
+```
+App Salmos (React/Vite, src/)
+  ├─ Cliente  (/)
+  ├─ Staff    (/Staff)
+  └─ Admin    (/Admin)
+        │  services/ (barrel único)
+        ▼
+Supabase (PostgreSQL 17 + Auth + Edge Functions)
+        ▲                          │
+        │ (JWT del usuario, RLS)   │ (service_role / x-sync-secret)
+        │                          ▼
+  api.loyverse.com ──► Edge Functions ──► Supabase ──► App
+  (clientes, receipts)        (server-side SOLO)
+```
+
+- **App Salmos**: SPA React, experiencias por `pathname` (sin router
+  externo: `/` → Cliente, `/Staff` → Staff, `/Admin` → Admin). Las pantallas
+  importan **solo** desde `services/index.js` (barrel único).
+- **Supabase**: fuente de verdad de identidad, reglas de lealtad (RPCs
+  transaccionales idempotentes), datos y estado del sync. Toda escritura
+  sensible pasa por RPCs `SECURITY DEFINER` con grants exclusivos de
+  `service_role`; el cliente solo lee **su** fila (RLS).
+- **Loyverse (API v1.0)**: POS como fuente de verdad de ventas/receipts y
+  del catálogo de clientes. **Únicamente server-side** desde Edge Functions;
+  el navegador jamás llama a `api.loyverse.com` y el `LOYVERSE_ACCESS_TOKEN`
+  jamás sale del servidor.
+
+Flujo de datos de una venta:
+
+```
+Loyverse (POS) ──► Edge loyverse-receipts-sync ──► RPC register_visit_with_receipt
+                                                        │
+                                                        ▼
+                                             loyalty_visits (items, receipt_date, verse_id)
+                                                        │
+                                                        ▼
+                                             App Salmos (Activity → ticket, PDF, correo)
+```
+
+## D. Reglas actuales de loyalty
+
+Regla vigente oficial (migración `0012_required_visits_7.sql`, 2026-09-15):
+
+- **Una recompensa se genera al alcanzar 7 visitas válidas** en el ciclo.
+- Compra mínima válida: **$50 MXN**.
+- **Máximo 1 visita válida por cliente por día** (across ambas sucursales;
+  índice único parcial `(customer_id, visit_date) WHERE status = 'active'`).
+- La recompensa es **1 bebida o hasta $150 MXN** de consumo.
+- Vigencia de la recompensa: **3 meses** desde que se gana (`expires_at =
+  earned_at + interval '3 months'`); el estado `expired` se **deriva en
+  lectura** (`available` + `now > expires_at`), nunca depende de un cron.
+- Una visita posterior a completar un ciclo **pertenece al siguiente ciclo**
+  y no genera una segunda recompensa del ciclo anterior.
+- Cancelar una compra **revierte la visita**:
+  - Si la visita era la 7ª generadora → invalida la recompensa
+    (`rewards.status = 'cancelled'`) y **reabre el ciclo** (`active`).
+  - Una recompensa **ya redimida no se puede cancelar/revertir** (la RPC
+    bloquea con `P0001` sin modificar nada).
+  - Cancelar un receipt nunca registrado es un no-op idempotente.
+- **Idempotencia**: `external_sale_id` UNIQUE (`loyverse_receipt_<store>_
+  <receipt_number>`) — reenviar la misma venta reutiliza el resultado, nunca
+  duplica.
+- Dos sucursales (`branch_1`, `branch_2`) comparten la misma
+  tarjeta/ciclo del cliente.
+
+### Fuente de verdad
+
+El requisito de visitas se lee de **`public.loyalty_cycles.required_visits`**
+(donde están los datos), no de un número hardcodeado:
+
+- La RPC `register_visit` (0007) compara `v_active_visits >=
+  v_cycle.required_visits` para decidir el cierre del ciclo.
+- Fallback mock/frontend: `REQUIRED_VISITS = 7` en
+  `src/data/mockDatabase.js` (copia de diagnóstico, no autoridad).
+- `adminService` lee la regla de Supabase con fallback `?? REQUIRED_VISITS`.
+
+El **progreso** de la tarjeta se deriva de `loyalty_visits` (orden
+cronológico por `receipt_date` → `visit_date` → `created_at`); **no hay
+contador almacenado** en el esquema.
+
+## E. Flujo Cliente → Supabase → Loyverse
+
+1. El cliente se registra/inicia sesión en **Supabase Auth** (email o
+   teléfono + contraseña; OTP solo para recuperación; Google opcional).
+2. El alta de sesión asegura la fila `customers` (con `customer_code`
+   `SC-XXXXXXXX` como token QR) y dispara la **sincronización Loyverse**
+   **solo a través de la Edge Function** `loyverse-customers` — nunca
+   directo.
+3. La Edge Function (con el JWT del usuario, RLS) resuelve el cliente de
+   Loyverse: busca por **email** → busca por **teléfono** → **vincula** o
+   **crea**, con reglas conservadoras y defensa de concurrencia (claim
+   atómico por fila). El resultado queda en `loyverse_customer_id`.
+4. Un **cron externo** invoca `loyverse-receipts-sync` con `x-sync-secret`:
+   consulta `GET /v1.0/receipts` por ventana `updated_at` incremental y, por
+   cada receipt elegible, registra la visita (o la revierte si fue cancelado)
+   vía RPCs de Postgres.
+5. La app (Cliente) lee **sus** visitas/ciclos/recompensas directamente de
+   Supabase (RLS) y renderiza la tarjeta, el ticket (con versículo
+   persistido `verse_id`), opciones de PDF y correo.
+
+```
+UI ── authService/ ──► Supabase Auth ──► customers (Postgres, RLS)
+     (facade)         (registro/login)      │
+                                            ▼
+            Edge Function loyverse-customers ──► api.loyverse.com
+            (JWT del usuario, RLS)               /v1.0/customers
+                                                    (token SOLO aquí)
+```
+
+## F. Base de datos
+
+### Tablas `public` (resumen)
+
+| Tabla | Propósito |
+|---|---|
+| `customers` | Un cliente por `auth_user_id`; `customer_code` único `SC-XXXXXXXX`; `loyverse_customer_id` único; columnas de claim de sync (`loyverse_sync_claim`/`_at`) y estado (`loyverse_sync_status`) |
+| `customer_sync_events` | Auditoría de sync de clientes (`loyverse_linked`, `created`, `updated`, `conflict`, `error`) |
+| `loyalty_cycles` | Ciclo de fidelidad del cliente; **`required_visits`** (`7` vigente; default histórico `8`); `status` (`active`/`completed`) |
+| `loyalty_visits` | Cada compra elegible registrada: `external_sale_id` UNIQUE, `amount`, `visit_date`, `store_id`, `employee_id`, `timestamp`, `source`, `status` (`active`/`cancelled`), `items` (jsonb), `receipt_date`, `verse_id` |
+| `rewards` | Recompensas: `status` (`available`/`redeemed`/`cancelled`), `max_value` (150), `expires_at` (3 meses), `triggered_reward_id` |
+| `reward_redemptions` | Evidencia de redención detectada en los receipts (idempotente por receipt + discount) |
+| `audit_logs` | Traza de eventos de lealtad (`VISIT_ADDED`, `REWARD_EARNED`, …) |
+| `loyverse_sync_state` | Checkpoint/watermark del sync de receipts (`updated_at_min`/`_max`, `cursor`, `last_status`, claim) |
+| `bible_verse_pool` | 49 pasajes elegibles para el ticket (`verse_id`); == `TICKET_VERSE_IDS` |
+
+### Seguridad y diseño de datos
+
+- **RLS activo**: cada usuario solo lee/escribe su fila (`auth.uid() =
+  auth_user_id`). Las RPCs de escritura corren `SECURITY DEFINER` (grants
+  exclusivos de `service_role`); el navegador no las invoca con permisos de
+  cliente.
+- **`customers`** (migración `0008`, H1): el frontend solo tiene
+  `SELECT` + `INSERT`/`UPDATE` limitados a columnas públicas (name, email,
+  phone, profile, customer_code); las columnas internas `loyverse_*` solo las
+  escribe la Edge Function con `service_role`.
+- **Identidad de contacto**: email/teléfono normalizados con índices únicos
+  parciales (C4); el email de identidad siempre viene de GoTrue.
+- **Progreso y expiración derivados**: sin contador almacenado, sin cron de
+  expiración (derivado en lectura).
+- **Idempotencia**: `external_sale_id` UNIQUE + índices únicos parciales.
+
+## G. Migraciones
+
+Todas las migraciones viven en `supabase/migrations/`. Se aplican con
+`supabase db push` (o en orden en el SQL Editor).
+
+| Migración | Propósito |
+|---|---|
+| `0001_customers.sql` | `customers` + `customer_sync_events`; RLS por `auth.uid()`; `customer_code` `SC-XXXXXXXX` único |
+| `0002_loyalty_schema.sql` | `loyalty_cycles`, `loyalty_visits`, `rewards`, `audit_logs`; índices (idempotencia, 1 visita/día); RLS client-select; escrituras solo Edge/service_role |
+| `0003_auth_alias_rpc.sql` | `resolve_email_for_login` y `phone_is_registered` (login por teléfono sin romper RLS) |
+| `0004_loyverse_updated_event.sql` | Evento de auditoría `loyverse_updated` |
+| `0005_loyalty_engine.sql` | RPCs `register_visit`, `cancel_visit`, `redeem_reward`, `assert_loyalty_actor`, `visit_summary`; columnas `required_visits` (default 8 **histórico**) y `source` |
+| `0006_loyverse_sync_claim.sql` | Claim atómico de sync de clientes (`loyverse_sync_claim`/`_at`) |
+| `0007_loyverse_receipts_sync.sql` | RPCs `0005` recreadas (`triggered_reward_id`), `cancel_visit_by_sale`; tabla `loyverse_sync_state`; reglas: `external_sale_id` requerido, `amount < 50` → error, `v_active_visits >= required_visits` → completar ciclo + reward |
+| `0008_customers_identity_hardening.sql` | Hardening H1/C4: grants mínimos, índices únicos normalizados, columnas internas server-side |
+| `0009_reward_redemptions.sql` | `reward_redemptions` (evidencia de redenciones detectadas en receipts) |
+| `0010_loyverse_receipt_details.sql` | `loyalty_visits.items` (jsonb) + `receipt_date` (fecha REAL del cobro); RPC `register_visit_with_receipt` (valida con `register_visit` y persiste el detalle) |
+| `0011_visit_verse_id.sql` | `loyalty_visits.verse_id` + `bible_verse_pool` (49 pasajes); asignación conservada ante re-sync |
+| `0012_required_visits_7.sql` | **Regla vigente**: default `required_visits = 7`; actualiza **solo** ciclos activos con `required_visits = 8` a `7`. No toca completados ni activos con otro valor. Idempotente/no destructiva. (Nueva, **sin commitear** en esta auditoría) |
+
+### Regla sobre migraciones (documental, vigente)
+
+> **Las migraciones históricas no se modifican.** Un cambio de regla de
+> negocio es SIEMPRE una migración nueva:
+
+```
+0005 → regla histórica: 8 visitas   (no se edita)
+0012 → regla actual:   7 visitas
+0013 → (futuro, si cambia) → 8 visitas  (ejemplo de principio, no existe)
+```
+
+### Estado remoto del proyecto Supabase
+
+- Proyecto remoto: ref `gyugkrvdgxofnkfhzbeq`. Proyecto local
+  (`supabase/config.toml`): `project_id = "App_Salmos_LC"`, API `:54321`,
+  `max_rows = 1000`, PostgreSQL 17, Edge runtime Deno 2.
+- **Pendiente de revalidación**: en esta auditoría **no se re-ejecutó**
+  `supabase db push` ni `supabase migration list` contra el remoto (requiere
+  `SUPABASE_DB_PASSWORD`, no disponible). Se **documenta sin afirmar**
+  verificaciones no reproducidas en esta sesión. El checkpoint documental
+  previo (`docs/CURRENT_STATUS.md`) registró local = remoto hasta `0012`;
+  considerar ese estado **histórico** hasta revalidarlo.
+
+## H. Autenticación
+
+### Cliente (Supabase Auth real)
+
+- **Registro**: email + contraseña (el email es la identidad; el teléfono es
+  contacto + alias de login). Con `email confirmations = on` la cuenta queda
+  pendiente hasta confirmar desde el correo (plantilla `confirm-signup.html`).
+- **Login por email o teléfono + contraseña**: el teléfono se resuelve al
+  email con `resolve_email_for_login` (migración `0003`, `SECURITY DEFINER`,
+  devuelve el email solo si hay UNA coincidencia). La validación de
+  contraseña la hace siempre GoTrue.
+- **Recuperación de contraseña por OTP**: `signInWithOtp` + código de 6
+  dígitos por correo (plantilla `otp.html`, `{{ .Token }}`, sin link). Sin
+  proveedor SMS configurado, el código va al correo incluso si se pide con
+  teléfono. El SMS/OTP por SMS está analizado y **no implementado**.
+- **Google OAuth**: opción de acceso por redirect; bloque de
+  `config.toml` **comentado** hasta tener credenciales; un correo ya
+  registrado no se pisa (conflicto amigable).
+- Los errores se traducen a mensajes amigables en español
+  (`src/services/auth/authErrors.js`).
+
+### Staff y Admin (mock)
+
+- Staff: PIN `1234` (Ana Beltrán), `5678` (Marco Reyes), `2468` (Luisa
+  Padilla). Admin: PIN `9999` (Diana Salazar); el modo Admin no pide login
+  todavía (Fase 2). Su auth real es un paso posterior.
+
+## I. Integración Loyverse
+
+### Edge Functions (`supabase/functions/`)
+
+| Función | `verify_jwt` | Rol | Protección |
+|---|---|---|---|
+| `loyverse-customers` | `true` | Sync/creación/vínculo de clientes | JWT del usuario (RLS) + `service_role` para columnas internas |
+| `loyverse-receipts-sync` | `false` | Sync de receipts (scheduled) | Header `x-sync-secret` == `SYNC_CRON_SECRET`; claim atómico en `loyverse_sync_state`; service_role |
+| `send-ticket` | `true` | Enviar el ticket por correo | JWT del usuario; verificación de propiedad del ticket; correo destino SIEMPRE de GoTrue/customers |
+| `loyalty-engine` | `true` | Escrituras de lealtad (ver Roadmap) | JWT + validación de actor en el core |
+
+### `_shared/` (lógica pura, unit-testable con `node --test`)
+
+- `loyaltyEngineCore.js` — **no duplica reglas de negocio** ($50, 1
+  visita/día, 7ª visita, expiración…: viven en PostgreSQL; RPCs `0005`/
+  `0007`/`0010`). Valida formato, operación, actor y timezone
+  (`America/Tijuana`); el actor NUNCA viene del payload; `visit_date` se
+  calcula en servidor.
+- `loyverseCore.js` — orquestación cliente: email → teléfono → vincular /
+  crear / conflict. H1: un match SOLO por teléfono NO vincula
+  (`phone_requires_verification`); email+teléfono a clientes distintos =
+  `identity_conflict`; la actualización es conservadora (nunca sobrescribe un
+  valor distinto ni toca `total_*` del POS); ante un create duplicado,
+  rebusca y vincula.
+- `receiptsSyncCore.js` — Clasificación de receipts (`register` / `cancel` /
+  `ignore`), `external_sale_id = loyverse_receipt_<store>_<receipt_number>`,
+  ventana `LOYVERSE_WINDOW_DAYS = 30`, monto mínimo $50, cliente no mapeado
+  → nunca auto-crear, `TICKET_VERSE_IDS` (49 pasajes) y asignación de
+  `verse_id` con Web Crypto (nunca `Math.random`).
+- `syncClaim.js` — claim atómico server-side (lease 10 min) contra el
+  doble sync de clientes/receipts.
+- `smtpConn.js` — resolución del puerto SMTP (Gmail: implicit TLS 465).
+- `ticketEmail*.js` — render de los correos del ticket (versículos, Code
+  128, `assertNoFakeData`).
+
+### Reglas del sync de receipts
+
+- Receipt sin `customer_id` → `no_customer`, ignorado.
+- Receipt cancelado → `cancel_visit_by_sale` (no-op si nunca se registró).
+- `total_money < $50` → `below_minimum`, ignorado.
+- Cliente de Loyverse no mapeado a Salmos → `unmapped_customer`, ignorado
+  (**nunca se auto-crea** un cliente ni una visita).
+- Resto → registra visita con `register_visit_with_receipt` (que valida TODO
+  con `register_visit` y persiste items/`receipt_date`/`verse_id`).
+- **Watermark**: `loyverse_sync_state.updated_at_min` solo avanza si la
+  corrida termina sin errores de infraestructura; los conflictos de negocio
+  (`P0001`) se cuentan/reportan sin bloquear el avance.
+- Si `0010` no está aplicada aún (RPC ausente, `PGRST202`), se registra con
+  `register_visit` (mismas reglas) y se cuenta `detail_unavailable`.
+
+## J. Tests y validación
+
+- **`npm test` → 246/246 pasando · 0 fallos** (`node --test
+  "tests/*.test.mjs"`, 14 suites):
+  `auth`, `code128`, `loyalty-engine`, `loyalty`, `loyverse-sync`,
+  `navigation`, `psalms`, `receipts-sync-core`, `send-ticket-email`,
+  `single-flight`, `smtp-conn`, `sync-claim`, `verse-assignment`,
+  `visit-ordering`.
+- Cobertura de loyalty (documentada también en `docs/CURRENT_STATUS.md`):
+  6 visitas → sin recompensa · 7 visitas → recompensa · 8.ª visita →
+  pertenece al siguiente ciclo y no genera una segunda recompensa · ciclo
+  nuevo → `requiredVisits = 7` · cancelación de la 7.ª visita · recompensa
+  redimida · expiración.
+- **`npm run build` → OK** (3.09s). Único aviso: **preexistente** de chunk
+  Vite > 500 kB (`index-*.js` ~595 kB, gzip ~197 kB); sin errores.
+- **`npm audit` → 0 vulnerabilidades.**
+- QA real (histórico, 2026-09-15): 297 receipts procesados, 4 visitas
+  reconstruidas (`1-0759→v1`, `1-0784→v2`, `1-0980→v3`, `1-0997→v4`), con
+  `receipt_date` real y `verse_id` persistido; Activity `4 → 3 → 2 → 1`.
+
+## K. Cómo ejecutar el proyecto localmente
+
+```bash
+npm install
+npm run dev      # desarrollo (Vite)
+npm test         # 246/246, sin navegador
+npm run build    # build de producción
+```
+
+- **URLs**: `/` = Cliente, `/Staff` = Staff, `/Admin` = Admin (la SPA
+  resuelve la primera ruta del pathname, sin router externo).
+- **Sin `.env`**: la app corre en **modo demo** (auth mock en memoria,
+  reglas de loyalty del fallback `mockDatabase`).
+- **Con `.env`** (`VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY`): registro,
+  login y lecturas de lealtad pasan a **Supabase real** (RLS).
+
+Supabase local/remoto:
+
+```bash
+supabase start                 # stack local (Postgres 17, Studio, Edge)
+supabase db push               # aplica migraciones 0001-0012 (remoto: requiere SUPABASE_DB_PASSWORD)
+supabase functions deploy loyalty-engine
+supabase functions deploy loyverse-customers
+supabase functions deploy loyverse-receipts-sync
+supabase functions deploy send-ticket
+```
+
+(`loyverse-receipts-sync` la invoca un cron externo con el header
+`x-sync-secret`.)
+
+### Credenciales de la demo
+
+- **Cliente:** `javier@example.com` / `demo1234` (también teléfono
+  `+52 664 123 4567`). OTP demo: `123456` válido, `000000` vencido.
+- **Escáner de Staff:** campo "Simular escaneo" precargado con `SC-004821`
+  (tarjeta de Javier).
+
+## L. Variables de entorno / configuración
+
+`.env.example` está commiteado y documenta **todas** las variables con
+placeholders; los valores reales viven solo en `.env` (**gitignored**).
+
+| Variable | Dónde | Rol |
+|---|---|---|
+| `VITE_SUPABASE_URL` | Frontend (pública) | URL del proyecto Supabase (`https://gyugkrvdgxofnkfhzbeq.supabase.co`) |
+| `VITE_SUPABASE_ANON_KEY` | Frontend (pública) | anon key pública |
+| `VITE_LOYVERSE_CUSTOMERS_FUNCTION_URL` | Frontend (opcional) | URL de la Edge `loyverse-customers` (default: `${VITE_SUPABASE_URL}/functions/v1/loyverse-customers`) |
+| `LOYVERSE_ACCESS_TOKEN` | Edge (SOLO servidor) | Token de Loyverse leer/escribir |
+| `SYNC_CRON_SECRET` | Edge (SOLO servidor) | Secreto compartido del cron (`x-sync-secret`) para `loyverse-receipts-sync` |
+| `SMTP_HOST/PORT/USER/PASS` | Auth y Edge `send-ticket` | SMTP custom / envío del ticket (bloques comentados en `config.toml` hasta tener proveedor/dominio) |
+| `SMTP_SENDER_EMAIL / SMTP_SENDER_NAME / SMTP_APP_URL` | Edge `send-ticket` | Remitente y CTA del correo del ticket |
+| `SMTP_ADMIN_EMAIL` | Auth | `[auth.email.smtp]` |
+| `GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET` | Auth | `[auth.external.google]` (comentado hasta tener credenciales) |
+
+Reglas: los tokens/secretos **jamás** van al bundle (nunca `VITE_*`); los
+secretos reales **nunca** se suben a Git.
+
+## M. Estructura de carpetas importante
+
+```
+src/
+  App.jsx                     orquestador raíz + resolución por URL
+  data/mockDatabase.js        "backend falso" (fallback demo) — REQUIRED_VISITS=7
+  data/bible-verses.json      dataset local de 150 pasajes RVR1960 (sin red)
+  services/                   motor de fidelización real; barrel ÚNICO services/index.js
+    loyalty/                  loyaltyService (lecturas reales + fallback demo), rewardService (deriveStatus)
+    sales/                    salesService (única puerta de ventas), ManualSalesAdapter, ticketService
+    customers/  staff/  admin/  loyverse/  auth/
+  screens/client/             Home, Rewards, Activity, Profile, Settings
+  screens/staff/              StaffLogin, StaffHome, Scanner, CustomerFound, RegisterSale, Confirmation, StaffActivity
+  screens/admin/              Dashboard, Customers, ComingSoon
+  components/loyalty/         StampTrack, SyncBanner, DailyVerse (oculto del Home por diseño)
+  components/activity/        TicketVerse, ReceiptPrinter, Code128Barcode
+  lib/                        supabase/client.js, utils/env.js, phone.js, psalms.js,
+                              ticketVerse.js, saleOrdering.js, code128.js, receiptPdf.js
+tests/                        14 suites node --test (*.test.mjs)
+email-templates/              fuente única de los 5 emails branded (confirm-signup,
+                              reset-password, otp, change-email, welcome) + assets/
+scripts/                      build-templates-payload.py, patch-email-templates.ps1
+supabase/
+  config.toml                 proyecto local, auth, templates, verify_jwt de funciones
+  migrations/                 0001-0012 (G)
+  functions/                  4 Edge Functions + _shared/ (I)
+```
+
+## N. Qué está terminado
+
+- ✅ Base funcional: app + motor de fidelización real (reglas verificadas por
+  tests).
+- ✅ Motor de lealtad SQL (migraciones `0001`–`0007` + `0010`/`0011`/`0012`)
+  y RPCs transaccionales.
+- ✅ Regla vigente de **7 visitas** (`0012`), con migraciones históricas
+  intactas.
+- ✅ Lecturas del Cliente reales (Home, Recompensas, Actividad, Perfil,
+  Configuración) directamente de Supabase (RLS), incl. detalle del ticket
+  (`items`, `receipt_date`, `verse_id` persistido) y orden cronológico.
+- ✅ Autenticación de Cliente en Supabase (correo/teléfono + contraseña; OTP
+  solo recuperación; Google opcional; sesión persistente).
+- ✅ Sync de clientes Loyverse (Fase C): crear, vincular y **actualizar
+  conservadoramente**; defensa de concurrencia (claim atómico + single-flight)
+  validada en el ambiente real.
+- ✅ Sync de receipts (Fase D2-v1): Edge `loyverse-receipts-sync`, watermark,
+  ventana 30 días, idempotencia, cancelaciones; QA real aprobado (4 visitas
+  reconstruidas).
+- ✅ Ticket: versículo por visita (`verse_id` → pool de 49), Code 128, PDF,
+  envío por correo (`send-ticket` con nodemailer; SMTP pendiente).
+- ✅ Email templates branded (5) cableados en `config.toml` + scripts de
+  despliegue verificados.
+- ✅ Dataset local de Salmos (150 pasajes RVR1960), `psalms.js`,
+  `TicketVerse`.
+- ✅ 246/246 tests pasando; build OK; `npm audit` 0 vulnerabilidades.
+
+## O. Qué está pendiente
+
+- ⏳ Migrar las **escrituras Staff** al motor real (venta manual, canje,
+  cancelación) sobre las RPCs (`register_visit`/`cancel_visit`/
+  `redeem_reward`) y eliminar el DEV bridge (`ensureLoyaltyProfile` +
+  `mockDatabase`).
+- ⏳ Definir el **scheduler/cron formal** de `loyverse-receipts-sync` en el
+  ambiente productivo (invoque con `x-sync-secret`).
+- ⏳ QR con **token firmado**.
+- ⏳ Emails branded en producción: publicar dominio, hospedar el logo en su
+  URL definitiva (hoy URL provisional en `[LOGO_URL_PROVISIONAL]`), retirar
+  comentarios, definir el disparador de `welcome.html`, y **SPF/DKIM/DMARC**
+  para la entrega real.
+- ⏳ SMTP real de `send-ticket` en el entorno de la Edge (hoy responde
+  `email_not_configured` si no hay credenciales).
+- ⏳ Credenciales reales de Google OAuth (bloque comentado en `config.toml`).
+- ⏳ Auth real de Staff/Admin (hoy PIN mock).
+- ⏳ Conectar ventas Loyverse a la UI (hoy `ManualSalesAdapter`).
+- ⏳ **Revalidar el estado remoto** del proyecto Supabase (`supabase db push`
+  / `migration list`) con `SUPABASE_DB_PASSWORD` (pendiente de esta
+  auditoría).
+
+## P. Historial importante de decisiones
+
+- **Regla de fidelidad 8 → 7 visitas.** Originalmente la recompensa se
+  generaba en la 8ª visita (`0005` con `required_visits DEFAULT 8`). Por
+  decisión de negocio (2026-09-15) la regla vigente es **7 visitas**,
+  introducida con una migración **nueva** (`0012`) que actualiza solo ciclos
+  activos; **ninguna migración histórica fue modificada**.
+- **Principio de migraciones**: un cambio de regla posterior debe ser otra
+  migración (`0013 → 8` si algún día volviera), nunca una edición de las ya
+  aplicadas. Documentado en el README y en `docs/CURRENT_STATUS.md`.
+- **Fuente de verdad de la regla**: `loyalty_cycles.required_visits` en la
+  BD; el frontend/mock solo usa `REQUIRED_VISITS = 7` como fallback, nunca
+  como autoridad.
+- **Progreso derivado, no contador**: el esquema no guarda "N visitas";
+  todo se deriva de `loyalty_visits`. El estado `expired` de la recompensa
+  también se deriva en lectura (sin cron).
+- **H1/C4 — endurecimiento de identidad (`0008`)**: el navegador dejó de
+  escribir columnas internas de Loyverse (`loyverse_customer_id`,
+  `loyverse_sync_status`, claims); las escrituras internas son SOLO
+  `service_role` tras validar el JWT del dueño. La identidad de contacto
+  siempre viene de GoTrue; match por teléfono solo NO vincula.
+- **Doble defensa de concurrencia**: guard single-flight en el frontend +
+  **claim atómico por fila** en la BD (`0006` para clientes,
+  `loyverse_sync_state` para receipts; lease 10 min). El perdedor responde
+  `409 … in_progress` (`retriable`) sin llamar a la API de Loyverse.
+- **Idempotencia total del sync**: `external_sale_id` determinístico
+  (`loyverse_receipt_<store>_<receipt_number>`) con UNIQUE; el watermark del
+  sync solo avanza si la corrida termina sin errores de infraestructura; los
+  errores de negocio (`P0001`) no bloquean el avance.
+- **Transporte de correo: `nodemailer` (npm:nodemailer@^9)** sustituyó a
+  `deno.land/x/smtp` (API Deno 1.x obsoleta → `Deno.writeAll is not a
+  function`). Gmail: implicit TLS en 465 (`secure: puerto === 465`); 587 →
+  STARTTLS automático.
+- **Versículo por visita (`0011`)**: el ticket usa un `verse_id` **persistido**
+  (se asigna con Web Crypto al registrar, nunca `Math.random`, y se conserva
+  ante re-sync); visita pre-`0011` → versículo del día como fallback.
+- **`receipt_date` real ≠ `created_at`** (`0010`): la fecha de negocio del
+  ticket sale del receipt de Loyverse (nunca UTC ni el reloj del llamador);
+  el orden de Actividad usa `receipt_date → visit_date → created_at`.
+- **Regla de oro del frontend**: el cliente **nunca incrementa sus propias
+  visitas**; el único camino público es `salesService.registerSale()` (Staff),
+  y cancelar/redimir también los confirma Staff, nunca el cliente.
+- **QA de prueba (2026-09-15)**: se limpió solo el historial de prueba del
+  cliente Javier en `loyalty_visits` (nada de Loyverse se modificó/borró) y se
+  reejecutó el sync con checkpoint retrocedido a `2026-09-07`.
+- **Corrección documental en código (2026-09-16)**: comentario obsoleto
+  "8ª visita" corregido en `supabase/functions/_shared/loyaltyEngineCore.js`
+  para reflejar la regla vigente de **7 visitas** (sin cambios de lógica;
+  auditoría verificó que no hay otros comentarios equivalentes en el código).
 
 ## Documentation
 
-- `docs/psalms-dataset.md` — dataset de Salmos: proceso de construcción, validación (150 pasajes, 1,406/1,406 versículos), integración en la aplicación (DailyVerse + TicketVerse en ticket), selección de pasajes cortos.
-- `docs/CURRENT_STATUS.md` — estado actual verificable del proyecto.
+- `docs/CURRENT_STATUS.md` — estado verificable del proyecto y checkpoint de la
+  regla de 7 visitas.
 - `docs/AUTH_AND_LOYVERSE_FLOW.md` — flujo de auth y sincronización con Loyverse.
-- `docs/AUTH_AUDIT.md` — auditoría AUTH-1/AUTH-2 (SMTP, plantillas de email, Google OAuth) y actualizaciones recientes.
+- `docs/AUTH_AUDIT.md` — auditoría AUTH-1/AUTH-2 (SMTP, plantillas, Google OAuth).
 - `docs/SALMOS_EMAIL_DESIGN.md` — diseño aprobado de los 5 emails branded.
-- `docs/FASE_D1_DESIGN.md` — diseño de la Fase D (motor de lealtad).
+- `docs/FASE_D1_DESIGN.md` — diseño de la Fase D (motor de lealtad; contiene
+  referencias históricas a la regla de 8 visitas).
+- `docs/psalms-dataset.md` — dataset de Salmos (150 pasajes, validación).
 - `AUTH_UX_DESIGN.md` — decisiones de UX del flujo de autenticación.
-- `Salmos_Estructura_de_Datos.md` — auditoría original y modelo de datos completo.
+- `Salmos_Estructura_de_Datos.md` — auditoría y modelo de datos original.

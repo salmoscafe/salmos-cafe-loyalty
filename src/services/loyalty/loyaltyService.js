@@ -102,9 +102,9 @@ export async function getCardForCustomer(customerId) {
 }
 
 // Ciclo "vigente" de una tarjeta: el activo normalmente. Entre que un
-// ciclo llega a 8/8 (status -> "completed") y Staff confirma el canje,
+// ciclo llega a 7/7 (status -> "completed") y Staff confirma el canje,
 // no existe ningún ciclo activo todavía — y la tarjeta debe seguir
-// mostrando el 8/8 desbloqueado, no resetear a 0/8. Por eso cae al
+// mostrando el 7/7 desbloqueado, no resetear a 0/7. Por eso cae al
 // ciclo más reciente cuando no hay uno activo.
 export function currentCycleForCard(cardCycles) {
   const active = cardCycles.find((cy) => cy.status === "active");

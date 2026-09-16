@@ -281,7 +281,7 @@ sigue habiendo un solo botón y ninguna promoción.
 │   cualquiera de nuestras sucursales suma    │
 │   en tu tarjeta digital.                    │
 │                                             │
-│   Acumula 8 visitas y obtén una bebida o    │
+│   Acumula 7 visitas y obtén una bebida o    │
 │   consumo equivalente hasta $150 MXN.       │
 │   Muestra tu código QR en caja — nosotros   │
 │   nos encargamos del resto.                 │

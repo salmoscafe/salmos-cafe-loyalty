@@ -232,7 +232,7 @@ test("render: visita activa con recompensa muestra el ticket completo", () => {
   const html = renderTicketEmail({
     visit,
     cycleVisits: progress.get(visit.id),
-    requiredVisits: 8,
+    requiredVisits: 7,
     appUrl: "https://app.salmoscafe.mx",
   });
 
@@ -245,7 +245,7 @@ test("render: visita activa con recompensa muestra el ticket completo", () => {
   assert.match(html, /\$120/); // total
   assert.match(html, /VISITA REGISTRADA ✓/);
   assert.match(html, /Tu tarjeta/);
-  assert.match(html, /2 \/ 8 visitas/);
+  assert.match(html, /2 \/ 7 visitas/);
   assert.match(html, /🎁 ¡RECOMPENSA GANADA!/);
   // imágenes con URL absoluta (requisito de los correos)
   assert.match(html, /src="https:\/\/raw\.githubusercontent\.com\/salmoscafe\/salmos-cafe-loyalty\/main\/email-templates\/assets\/wordmark-cream\.png"/);
@@ -259,7 +259,7 @@ test("render: visita activa con recompensa muestra el ticket completo", () => {
 test("render: importa el versículo real del visit y el barcode real", () => {
   const visit = baseVisit({ id: "v2" });
   const progress = computeCycleVisitProgress(VISITS_FOR_PROGRESS);
-  const html = renderTicketEmail({ visit, cycleVisits: progress.get(visit.id), requiredVisits: 8 });
+  const html = renderTicketEmail({ visit, cycleVisits: progress.get(visit.id), requiredVisits: 7 });
 
   const passage = requirePassage(visit.verse_id);
   assert.ok(
@@ -281,7 +281,7 @@ function requirePassage(id) {
 }
 
 test("render: visita activa sin recompensa no muestra recompensa", () => {
-  const html = renderTicketEmail({ visit: baseVisit({ triggered_reward_id: null }), cycleVisits: 1, requiredVisits: 8 });
+  const html = renderTicketEmail({ visit: baseVisit({ triggered_reward_id: null }), cycleVisits: 1, requiredVisits: 7 });
   assert.match(html, /VISITA REGISTRADA ✓/);
   assert.doesNotMatch(html, /RECOMPENSA GANADA/);
   assertNoFakeData(html);
@@ -306,7 +306,7 @@ test("render: sin progreso disponible se omite la línea del contador", () => {
   assert.match(html, /VISITA REGISTRADA ✓/);
   assert.match(html, /RECOMPENSA GANADA/);
   assert.doesNotMatch(html, /Tu tarjeta/);
-  assert.doesNotMatch(html, /\/ 8 visitas/);
+  assert.doesNotMatch(html, /\/ 7 visitas/);
   assertNoFakeData(html);
 });
 
@@ -318,7 +318,7 @@ test("render: el barcode usa el folio del visit (número bajo las barras = valor
 });
 
 test("render: sin SMTP_APP_URL no hay CTA (no se inventa URL)", () => {
-  const html = renderTicketEmail({ visit: baseVisit(), cycleVisits: 2, requiredVisits: 8, appUrl: "" });
+  const html = renderTicketEmail({ visit: baseVisit(), cycleVisits: 2, requiredVisits: 7, appUrl: "" });
   assert.doesNotMatch(html, /Abrir mi tarjeta/);
   assert.doesNotMatch(html, /<a href=/);
   assertNoFakeData(html);
@@ -336,7 +336,7 @@ test("render: escapa contenido del cliente (nombres, versículo)", () => {
 });
 
 test("render: visita sin items muestra solo TOTAL (como el ticket)", () => {
-  const html = renderTicketEmail({ visit: baseVisit({ items: null }), cycleVisits: 1, requiredVisits: 8 });
+  const html = renderTicketEmail({ visit: baseVisit({ items: null }), cycleVisits: 1, requiredVisits: 7 });
   assert.match(html, /TOTAL/);
   assertNoFakeData(html);
 });

@@ -106,30 +106,30 @@ test("compras en días distintos generan visitas independientes", async () => {
   assert.equal(second.cycle.visits, 2);
 });
 
-// 6 y 7. Visita 7 sin recompensa, visita 8 con recompensa
-test("visita 7 no genera recompensa, visita 8 sí", async () => {
+// 6 y 7. Visita 6 sin recompensa, visita 7 con recompensa
+test("visita 6 no genera recompensa, visita 7 sí", async () => {
   const { customerId, cardId } = makeCustomer("t6");
   let lastRes;
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < 6; i++) {
     lastRes = await sell({ customerId, cardId, amount: 60 });
     assert.equal(lastRes.ok, true);
     lastRes.sale.createdAt = daysAgoIso(30 - i); // cada una un día distinto, en el pasado
   }
-  assert.equal(lastRes.cycle.visits, 7);
+  assert.equal(lastRes.cycle.visits, 6);
   assert.equal(lastRes.newReward, null);
 
-  const eighth = await sell({ customerId, cardId, amount: 60 });
-  assert.equal(eighth.cycle.visits, 8);
-  assert.ok(eighth.newReward, "la 8ª visita debe generar una recompensa");
-  assert.equal(eighth.newReward.status, "available");
-  assert.equal(eighth.cycle.status, "completed");
+  const seventh = await sell({ customerId, cardId, amount: 60 });
+  assert.equal(seventh.cycle.visits, 7);
+  assert.ok(seventh.newReward, "la 7ª visita debe generar una recompensa");
+  assert.equal(seventh.newReward.status, "available");
+  assert.equal(seventh.cycle.status, "completed");
 });
 
 // 8. Recompensa expira a los 3 meses
 test("la recompensa expira a los 3 meses (derivado, sin cron)", async () => {
   const { customerId, cardId } = makeCustomer("t7");
   let res;
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 7; i++) {
     res = await sell({ customerId, cardId, amount: 60 });
     res.sale.createdAt = daysAgoIso(60 - i);
   }
@@ -169,11 +169,11 @@ test("cancelar una venta revierte la visita", async () => {
   assert.ok(saleRecord.cancelledAt);
 });
 
-// 10. Cancelar la venta que creó la visita 8 → recompensa invalidada, ciclo corregido
-test("cancelar la venta de la 8ª visita invalida la recompensa y reabre el ciclo", async () => {
+// 10. Cancelar la venta que creó la visita 7 → recompensa invalidada, ciclo corregido
+test("cancelar la venta de la 7ª visita invalida la recompensa y reabre el ciclo", async () => {
   const { customerId, cardId } = makeCustomer("t9");
   let res;
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 7; i++) {
     res = await sell({ customerId, cardId, amount: 60 });
     res.sale.createdAt = daysAgoIso(60 - i);
   }
@@ -189,7 +189,7 @@ test("cancelar la venta de la 8ª visita invalida la recompensa y reabre el cicl
 
   const cycle = loyaltyCycles.find((c) => c.id === cycleId);
   assert.equal(cycle.status, "active");
-  assert.equal(cycle.visits, 7);
+  assert.equal(cycle.visits, 6);
   assert.equal(cycle.rewardId, null);
 });
 
@@ -197,7 +197,7 @@ test("cancelar la venta de la 8ª visita invalida la recompensa y reabre el cicl
 test("cancelar una venta cuya recompensa ya fue redimida se bloquea sin modificar nada", async () => {
   const { customerId, cardId } = makeCustomer("t10");
   let res;
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 7; i++) {
     res = await sell({ customerId, cardId, amount: 60 });
     res.sale.createdAt = daysAgoIso(60 - i);
   }
@@ -256,4 +256,97 @@ test("el barrel público de services no expone addVisit ni nada que mute visitas
   assert.equal(typeof loyaltyService.addVisit, "function", "addVisit debe existir, pero solo para uso interno");
   // El único camino público para sumar una visita es registerSale.
   assert.equal(typeof publicServices.salesService.registerSale, "function");
+});
+
+// ====================================================================
+// QA · REGLA DOCUMENTADA — "6 visitas acumuladas → la 7.ª visita
+// genera/desbloquea la recompensa." (default/regla nueva = 7)
+//
+// Cobertura ya existente arriba (no se duplica):
+//   * compra < $50 no genera visita                     → test 1
+//   * máximo 1 visita válida por cliente por día        → test 4
+//
+// Casos que faltaban y se cubren aquí:
+//   1) Con 6 visitas activas: sin recompensa disponible
+//      (getCurrentReward === null) y ciclo sigue activo.
+//   2) Registrar la visita #7: exactamente 1 recompensa,
+//      available, ciclo completed, triggered_reward_id asociado.
+//   3) Registrar otra visita después del 7/7: NO crea una
+//      segunda recompensa del mismo ciclo; abre un ciclo nuevo.
+// ====================================================================
+
+function sellBehindDays({ customerId, cardId, amount = 60, daysAgo }) {
+  return sell({ customerId, cardId, amount }).then((res) => {
+    res.sale.createdAt = daysAgoIso(daysAgo);
+    return res;
+  });
+}
+
+test("QA · regla 7/7: con 6 visitas activas no existe recompensa disponible y el ciclo sigue activo", async () => {
+  const { customerId, cardId } = makeCustomer("qa_6v");
+  let lastRes;
+  for (let i = 0; i < 6; i++) {
+    lastRes = await sellBehindDays({ customerId, cardId, daysAgo: 30 - i });
+  }
+  assert.equal(lastRes.cycle.visits, 6);
+  assert.equal(lastRes.newReward, null, "6 visitas no pueden devolver una recompensa");
+  assert.equal(lastRes.cycle.status, "active", "con 6 visitas el ciclo debe seguir activo");
+
+  const current = await rewardService.getCurrentReward(cardId);
+  assert.equal(current, null, "con 6 visitas no debe existir recompensa disponible");
+});
+
+test("QA · regla 7/7: la 7.ª visita genera exactamente 1 recompensa available y queda asociada a esa visita", async () => {
+  const { customerId, cardId } = makeCustomer("qa_7v");
+  let res;
+  for (let i = 0; i < 6; i++) {
+    res = await sellBehindDays({ customerId, cardId, daysAgo: 30 - i });
+  }
+
+  const seventh = await sell({ customerId, cardId, amount: 60 });
+  assert.equal(seventh.ok, true);
+  assert.ok(seventh.newReward, "la 7ª visita debe generar una recompensa");
+  assert.equal(seventh.newReward.status, "available");
+  assert.equal(seventh.cycle.status, "completed", "el ciclo debe pasar a completed al llegar a 7");
+  assert.equal(seventh.cycle.requiredVisits, 7, "el ciclo completado se selló con el requisito de 7 visitas");
+
+  const rewardId = seventh.newReward.id;
+  assert.equal(seventh.sale.triggeredRewardId, rewardId, "triggered_reward_id debe asociarse a la visita #7");
+
+  const cycleRewards = rewards.filter((r) => r.cycleId === seventh.cycle.id);
+  assert.equal(cycleRewards.length, 1, "debe existir EXACTAMENTE una recompensa para el ciclo completado");
+  assert.equal(cycleRewards[0].status, "available");
+
+  const current = await rewardService.getCurrentReward(cardId);
+  assert.equal(current?.id, rewardId, "la recompensa disponible debe ser la generada por la 7ª visita");
+});
+
+test("QA · regla 7/7: una visita posterior al 7/7 no crea una segunda recompensa (abre ciclo nuevo)", async () => {
+  const { customerId, cardId } = makeCustomer("qa_8v");
+  let res;
+  for (let i = 0; i < 6; i++) {
+    res = await sellBehindDays({ customerId, cardId, daysAgo: 30 - i });
+  }
+  const seventh = await sell({ customerId, cardId, amount: 60 });
+  const completedCycleId = seventh.cycle.id;
+  const earnedRewardId = seventh.newReward.id;
+
+  // La 7ª se registró hoy; la movemos a ayer para poder registrar otra
+  // compra válida (máximo 1 visita/día) y observar el ciclo completado.
+  seventh.sale.createdAt = daysAgoIso(1);
+
+  const eighth = await sell({ customerId, cardId, amount: 60 });
+  assert.equal(eighth.ok, true);
+  assert.notEqual(eighth.cycle.id, completedCycleId, "la venta posterior debe abrir un ciclo NUEVO");
+  assert.equal(eighth.cycle.visits, 1);
+  assert.equal(eighth.cycle.status, "active");
+  assert.equal(eighth.cycle.requiredVisits, 7, "el ciclo nuevo debe heredar el requisito de 7 visitas");
+
+  const completedCycle = loyaltyCycles.find((c) => c.id === completedCycleId);
+  assert.equal(completedCycle.status, "completed", "el ciclo 7/7 debe conservar su estado completed");
+
+  const cycleRewards = rewards.filter((r) => r.cycleId === completedCycleId);
+  assert.equal(cycleRewards.length, 1, "el ciclo 7/7 debe conservar UNA sola recompensa");
+  assert.equal(cycleRewards[0].id, earnedRewardId);
+  assert.equal(cycleRewards[0].status, "available", "la recompensa del ciclo 7/7 sigue available");
 });

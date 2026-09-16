@@ -23,7 +23,7 @@
 // con esa migración.
 //
 // Principios:
-//   * La Edge NO duplica reglas de negocio ($50, 1 visita/día, 8ª
+//   * La Edge NO duplica reglas de negocio ($50, 1 visita/día, 7ª
 //     visita, expiración...): eso vive en PostgreSQL (RPCs D1.1).
 //     Aquí solo se valida formato, operación, actor y timezone.
 //   * El actor NUNCA proviene del payload: se deriva de la sesión

@@ -11,6 +11,136 @@ nada se da por sentado de la documentación.
 
 ---
 
+## Checkpoint — Regla de loyalty de 7 visitas
+
+**Fecha:** 15 de septiembre de 2026.
+
+**Objetivo:** cerrar documentalmente la implementación de la regla oficial
+actual de lealtad: **la recompensa se genera al alcanzar 7 visitas válidas**
+(antes 8). Este checkpoint es **solo documentación**: no se realizan cambios
+de código ni de migraciones.
+
+### Decisión: migraciones intactas
+
+- Ninguna migración existente fue modificada; `0001`–`0011` permanecen
+  intactas (`0005_loyalty_engine.sql` conserva su `required_visits DEFAULT 8`
+  como regla histórica).
+- La nueva regla se introduce con una **migración nueva**:
+  `0012_required_visits_7.sql`.
+- Principio documentado en el README (futuro, sin implementar): un cambio
+  posterior de la regla debe ser otra migración (`0012 → 7 visitas` ·
+  `0013 → 8 visitas`), nunca una edición de migraciones ya aplicadas.
+
+### Migración 0012
+
+`supabase/migrations/0012_required_visits_7.sql`:
+
+1. Cambia el default de `required_visits` a `7`.
+2. Actualiza **únicamente** ciclos activos con `required_visits = 8` a `7`.
+3. **NO** modifica ciclos completados/históricos.
+4. **NO** modifica ciclos activos con otro valor.
+5. Es **idempotente / no destructiva**.
+
+### Cambios de código
+
+- `src/data/mockDatabase.js`: `REQUIRED_VISITS = 7` (fallback mock/frontend).
+- `src/services/admin/adminService.js`: el fallback pasa de `?? 8` a
+  `?? REQUIRED_VISITS` — la regla se lee de
+  `public.loyalty_cycles.required_visits` como **fuente de verdad**, sin
+  número hardcodeado.
+- `tests/loyalty.test.mjs`: lógica invertida a 7 y asserts de QA para el
+  ciclo nuevo (`requiredVisits === 7`).
+- `tests/send-ticket-email.test.mjs`: fixtures (`required_visits = 7`) y
+  regex del correo.
+- `email-templates/welcome.html`: "Acumula 7 visitas".
+- `docs/SALMOS_EMAIL_DESIGN.md`: "Acumula 7 visitas".
+
+### Tests
+
+```text
+npm test
+246/246 passing · 0 failures
+```
+
+Cobertura (documentada también en el README): 6 visitas → sin recompensa;
+7 visitas → recompensa; 8.ª visita → pertenece al siguiente ciclo y no genera
+una segunda recompensa; ciclo nuevo → `requiredVisits = 7`; cancelación de la
+7.ª visita; recompensa redimida; expiración.
+
+### Build
+
+```text
+npm run build
+Build exitoso
+```
+
+Único aviso: chunk Vite > 500 kB (preexistente, no introducido en este
+cambio).
+
+### Validación Supabase
+
+El proyecto remoto es `gyugkrvdgxofnkfhzbeq` ("salmoscafe's Project", org
+`ulanwatdntyuydbjdysl`). La migración `0012` quedó aplicada en remoto (ver
+Sincronización).
+
+### Sincronización
+
+- Antes de aplicar: `0001`–`0011` **local = remoto**; `0012` local y
+  pendiente en remoto.
+- Se ejecutó `supabase db push`, que aplicó `0012_required_visits_7.sql`.
+- Verificación posterior con `supabase migration list`:
+
+```text
+0001 | 0001
+0002 | 0002
+0003 | 0003
+0004 | 0004
+0005 | 0005
+0006 | 0006
+0007 | 0007
+0008 | 0008
+0009 | 0009
+0010 | 0010
+0011 | 0011
+0012 | 0012
+```
+
+- Local y remoto quedan **sincronizados hasta `0012`**, sin pendientes.
+- Sin secretos en este proceso ni en las migraciones documentadas.
+
+### Históricos
+
+- **Ciclos nuevos** → `required_visits = 7`.
+- **Ciclos activos existentes con 8** → actualizados a `7` por `0012`.
+- **Ciclos completados/históricos** → conservan su valor; `0012` no los
+  modifica.
+
+### Referencias históricas a 8 visitas
+
+> Nota: documentos y checkpoints anteriores a `0012` pueden mencionar la
+> regla anterior de **8 visitas** (p. ej. `0005_loyalty_engine.sql` con
+> `required_visits DEFAULT 8`, la sección "Actualización 2026-09-15 — QA
+> aprobado" más abajo, el checkpoint del README de 2026-09-14, etc.). Son
+> **históricos** y se conservan tal cual. La regla **vigente** es de **7
+> visitas** desde la migración `0012_required_visits_7.sql`.
+
+### Estado de Git
+
+- `supabase/migrations/0012_required_visits_7.sql` presente (nuevo).
+- Cambios funcionales de esta tarea ya realizados y validados (tests + build).
+- Cambios **preexistentes ajenos a esta tarea** en
+  `src/screens/client/Activity.jsx`, `Home.jsx` y `Rewards.jsx` — no son de la
+  regla de 7 visitas.
+- **Sin commit y sin push** (igual que los checkpoints documentales previos).
+
+### Próximo paso pendiente
+
+Antes de cualquier `git add`/`commit`: **separar los cambios por tarea** (la
+regla de 7 visitas por un lado; los preexistentes de Activity/Home/Rewards por
+otro). No se ejecuta en este checkpoint.
+
+---
+
 ## Actualización 2026-09-15 — QA aprobado: detalle del ticket (receipt_date, items, verse_id) y orden cronológico
 
 Checkpoint de cierre documental. Reglas de negocio **sin cambios** (recompensa en la 8ª visita, mínimo $50, **1 visita válida por día**, $150/bebida, 3 meses, cancelación revierte).

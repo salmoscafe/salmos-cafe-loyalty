@@ -8,7 +8,7 @@
 //
 // La función es una capa de validación y ENVOLTURA, NO la fuente de
 // verdad de las reglas de negocio. Las reglas ($50, 1 visita/día,
-// 8ª visita, expiración, cancelación, idempotencia) viven en las RPCs
+// 7ª visita, expiración, cancelación, idempotencia) viven en las RPCs
 // de 0005_loyalty_engine.sql. Aquí solo se valida:
 //   * autenticación (JWT);
 //   * formato del payload;

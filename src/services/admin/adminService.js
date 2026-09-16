@@ -1,6 +1,7 @@
 import { delay } from "../../lib/delay.js";
 import { customers, sales, rewards, loyaltyCycles, cards, branches } from "../../data/mockDatabase.js";
 import { searchCustomers } from "../customers/customerService.js";
+import { REQUIRED_VISITS } from "../../data/mockDatabase.js";
 
 // ---------------------------------------------------------------
 // adminService — lecturas agregadas para el dashboard y la lista
@@ -47,7 +48,7 @@ export async function listCustomersWithCards(query = "") {
       ...c,
       cardNumber: card?.cardNumber || "—",
       visits: cycle?.visits ?? 0,
-      requiredVisits: cycle?.requiredVisits ?? 8,
+      requiredVisits: cycle?.requiredVisits ?? REQUIRED_VISITS,
     };
   });
 }
