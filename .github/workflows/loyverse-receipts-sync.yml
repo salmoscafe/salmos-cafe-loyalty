@@ -1,0 +1,38 @@
+name: Loyverse Receipts Sync
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: loyverse-receipts-sync
+  cancel-in-progress: true
+
+jobs:
+  invoke-sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Invoke loyverse-receipts-sync
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $headers = @{ "x-sync-secret" = "${{ secrets.SYNC_CRON_SECRET }}" }
+          $url = "${{ vars.SYNC_URL }}"
+          $timestamp = (Get-Date).ToUniversalTime().ToString("o")
+          try {
+            $response = Invoke-RestMethod -Uri $url -Method Post -Headers $headers -ContentType 'application/json' -Body '{}' -TimeoutSec 480
+            Write-Host "$timestamp | Sync OK"
+            Write-Host "Body: $($response | ConvertTo-Json -Compress -Depth 4)"
+          } catch {
+            $status = $null
+            if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+            Write-Host "$timestamp | Sync FAILED, HTTP status: $status"
+            Write-Host $_.Exception.Message
+            exit 1
+          }
