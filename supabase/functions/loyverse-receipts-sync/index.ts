@@ -200,10 +200,11 @@ async function clampInitialCheckpoint(supabase, state) {
 }
 
 // Clientes de Salmos con loyverse_customer_id (mapa de resolución).
+// 0014: se transporta exclude_loyalty para la decisión staff_customer.
 async function fetchMappedCustomers(supabase) {
   const { data, error } = await supabase
     .from("customers")
-    .select("id, loyverse_customer_id")
+    .select("id, loyverse_customer_id, exclude_loyalty")
     .not("loyverse_customer_id", "is", null)
     .limit(5000);
   if (error) throw error;
@@ -233,6 +234,7 @@ async function runReceiptsSync({ supabase, state, transport }) {
     no_customer: 0,
     below_minimum: 0,
     unmapped_customer: 0,
+    staff: 0,
     invalid: 0,
     detail_unavailable: 0,
   };
@@ -269,6 +271,7 @@ async function runReceiptsSync({ supabase, state, transport }) {
         if (decision.reason === "no_customer") counts.no_customer++;
         else if (decision.reason === "below_minimum") counts.below_minimum++;
         else if (decision.reason === "unmapped_customer") counts.unmapped_customer++;
+        else if (decision.reason === "staff_customer") counts.staff++;
         else counts.invalid++;
         continue;
       }

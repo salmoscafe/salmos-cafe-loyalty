@@ -8,6 +8,7 @@
 //   * clasificación de receipts (casos A–D + malformados)
 //   * fecha de negocio America/Tijuana derivada del receipt
 //   * mapeo customers.loyverse_customer_id (nunca auto-crear)
+//   * exclusión administrativa staff_customer (0014: customers.exclude_loyalty)
 //   * argumentos EXACTOS de register_visit / cancel_visit_by_sale
 
 import test from "node:test";
@@ -236,6 +237,51 @@ test("decideReceiptAction: malformado -> ignore con reason, sin externalSaleId",
   assert.deepEqual(decision, { action: "ignore", reason: "missing_store_id", externalSaleId: null });
 });
 
+// ---------------------------------------------------------------
+// decideReceiptAction — exclusión administrativa 0014 (staff_customer)
+// ---------------------------------------------------------------
+test("decideReceiptAction: customer normal con exclude_loyalty=false -> register", () => {
+  const map = buildCustomerMap([
+    { id: "cust-a", loyverse_customer_id: "lv_customer_1", exclude_loyalty: false },
+  ]);
+  const decision = decideReceiptAction({ receipt: makeReceipt(), customerMap: map });
+  assert.equal(decision.action, "register");
+  // F: employee_id sigue viajando a p_employee_id cuando SÍ se registra.
+  assert.equal(decision.registerArgs.p_employee_id, "emp-1");
+  assert.equal(decision.registerArgs.p_source, SOURCE_LOYVERSE);
+});
+
+test("decideReceiptAction: customer con exclude_loyalty=true -> ignore staff_customer", () => {
+  const map = buildCustomerMap([
+    { id: "cust-excl", loyverse_customer_id: "lv_customer_1", exclude_loyalty: true },
+  ]);
+  const decision = decideReceiptAction({ receipt: makeReceipt(), customerMap: map });
+  assert.deepEqual(decision, { action: "ignore", reason: "staff_customer", externalSaleId: "loyverse_receipt_store-tj-1_1-0002" });
+});
+
+test("decideReceiptAction: customer excluido sin flag en el mapa -> register (default false)", () => {
+  // Un mapa que no trae la columna (undefined !== true) conserva el flujo.
+  const map = buildCustomerMap([
+    { id: "cust-a", loyverse_customer_id: "lv_customer_1" },
+  ]);
+  const decision = decideReceiptAction({ receipt: makeReceipt(), customerMap: map });
+  assert.equal(decision.action, "register");
+});
+
+test("decideReceiptAction: cancelado con customer excluido -> cancel (la cancelación manda y no se altera)", () => {
+  // Orden de decisión: no_customer → below_minimum → cancelled → resolver
+  // customer → unmapped_customer → staff_customer → register. La cancelación
+  // se resuelve ANTES de evaluar exclude_loyalty y no se modifica.
+  const map = buildCustomerMap([
+    { id: "cust-excl", loyverse_customer_id: "lv_customer_1", exclude_loyalty: true },
+  ]);
+  const decision = decideReceiptAction({
+    receipt: makeReceipt({ cancelled_at: "2026-09-13T01:00:00Z", total_money: 50 }),
+    customerMap: map,
+  });
+  assert.equal(decision.action, "cancel");
+});
+
 test("buildCancelArgs: firma cancel_visit_by_sale(text,text,text)", () => {
   assert.deepEqual(buildCancelArgs({ externalSaleId: "loyverse_receipt_s_t" }), {
     p_external_sale_id: "loyverse_receipt_s_t",
@@ -295,6 +341,31 @@ test("decidePage: página vacía no rompe el summary", () => {
   const { decisions, summary } = decidePage({ receipts: [], customerMap: makeCustomerMap() });
   assert.deepEqual(decisions, []);
   assert.equal(summary.count, 0);
+});
+
+test("decidePage: contabiliza staff (reason staff_customer) sin romper los demás contadores", () => {
+  const map = buildCustomerMap([
+    { id: "cust-a", loyverse_customer_id: "lv_customer_1" },
+    { id: "cust-excl", loyverse_customer_id: "lv_customer_2", exclude_loyalty: true },
+  ]);
+  const page = [
+    makeReceipt({ receipt_number: "1-0002", customer_id: "lv_customer_1", total_money: 50 }),
+    makeReceipt({ customer_id: "lv_customer_2", total_money: 50 }),
+    makeReceipt({ customer_id: null, total_money: 50 }),
+    makeReceipt({ total_money: 30 }),
+    makeReceipt({ customer_id: "lv_sin_mapear" }),
+  ];
+
+  const { summary } = decidePage({ receipts: page, customerMap: map });
+
+  assert.equal(summary.count, 5);
+  assert.equal(summary.registered, 1);
+  assert.equal(summary.staff, 1);
+  assert.equal(summary.noCustomer, 1);
+  assert.equal(summary.belowMinimum, 1);
+  assert.equal(summary.unmappedCustomer, 1);
+  assert.equal(summary.cancelled, 0);
+  assert.equal(summary.invalid, 0);
 });
 
 // ---------------------------------------------------------------

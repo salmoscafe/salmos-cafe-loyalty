@@ -22,6 +22,11 @@
 //   * receipt con total_money < $50 MXN      → ignorar (below_minimum).
 //   * cliente de Loyverse NO mapeado a Salmos → ignorar (unmapped_customer);
 //     NUNCA se auto-crea un cliente ni una visita sin mapear.
+//   * cliente con customers.exclude_loyalty = true → ignorar
+//     (staff_customer); la marca es administrativa (0014), NO deriva de
+//     receipt.employee_id (el cajero no es el comprador) ni de
+//     profiles.role; defensa en profundidad en register_visit_with_receipt
+//     (0015).
 //   * resto                                  → registrar visita.
 //   La fecha de negocio se deriva del receipt (receipt_date/created_at)
 //   en America/Tijuana (BUSINESS_TIMEZONE de loyaltyEngineCore): NUNCA
@@ -282,7 +287,8 @@ export function buildRegisterVisitWithReceiptArgs({ registerArgs, receipt }) {
 //   { action: 'register', externalSaleId, visitDate, registerArgs }
 //   { action: 'cancel',   externalSaleId, cancelArgs }
 //   { action: 'ignore',   externalSaleId, reason: 'no_customer' |
-//                         'below_minimum' | 'unmapped_customer' | <invalid-reason> }
+//                         'below_minimum' | 'unmapped_customer' |
+//                         'staff_customer' | <invalid-reason> }
 export function decideReceiptAction({ receipt, customerMap }) {
   const classification = classifyReceipt(receipt);
 
@@ -308,6 +314,12 @@ export function decideReceiptAction({ receipt, customerMap }) {
     return { action: "ignore", reason: "unmapped_customer", externalSaleId };
   }
 
+  // 0014: cliente marcado administrativamente como excluido del loyalty
+  // sync. Debe decidirse ANTES de construir los argumentos de registro.
+  if (customer.exclude_loyalty === true) {
+    return { action: "ignore", reason: "staff_customer", externalSaleId };
+  }
+
   const visitDate = buildVisitDate(receipt);
   return {
     action: "register",
@@ -321,10 +333,11 @@ export function decideReceiptAction({ receipt, customerMap }) {
 // Agrupación de decisiones por página (diagnóstico de corrida).
 // ---------------------------------------------------------------
 // Devuelve { decisions: [...], summary: { count, registered, cancelled,
-// noCustomer, belowMinimum, unmappedCustomer, invalid } } — puro, sin I/O.
+// noCustomer, belowMinimum, unmappedCustomer, staff, invalid } } — puro,
+// sin I/O.
 export function decidePage({ receipts, customerMap }) {
   const decisions = (receipts || []).map((receipt) => decideReceiptAction({ receipt, customerMap }));
-  const summary = { count: decisions.length, registered: 0, cancelled: 0, noCustomer: 0, belowMinimum: 0, unmappedCustomer: 0, invalid: 0 };
+  const summary = { count: decisions.length, registered: 0, cancelled: 0, noCustomer: 0, belowMinimum: 0, unmappedCustomer: 0, staff: 0, invalid: 0 };
   for (const decision of decisions) {
     switch (decision.action) {
       case "register":
@@ -337,6 +350,7 @@ export function decidePage({ receipts, customerMap }) {
         if (decision.reason === "no_customer") summary.noCustomer++;
         else if (decision.reason === "below_minimum") summary.belowMinimum++;
         else if (decision.reason === "unmapped_customer") summary.unmappedCustomer++;
+        else if (decision.reason === "staff_customer") summary.staff++;
         else summary.invalid++;
         break;
     }
