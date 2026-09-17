@@ -7,7 +7,55 @@ checkpoint "Mejoras UI/copy" abajo). Todo lo documentado aquí fue verificado
 contra el código real y el proyecto remoto; nada se da por sentado de la
 documentación.
 
-Última actualización: 2026-09-16.
+Última actualización: 2026-09-17.
+
+---
+
+## Checkpoint — CP3.3-B Customer → Loyverse Sync real
+
+**Fecha:** 17 de septiembre de 2026.
+
+**Objetivo:** dejar operativa la sincronización real de un cliente Salmos
+hacia Loyverse (Customer → Loyverse Sync) desde la app, tras detectar un fallo
+en producción. **Checkpoint documental:** no cambia código de la aplicación,
+migraciones ni configuraciones.
+
+- **Incidencia encontrada:** al reintentar desde la app la sincronización de un
+  cliente Salmos hacia Loyverse, la Edge Function fallaba con
+  `permission denied for table customers`.
+- **Causa:** la Edge Function `loyverse-customers` **desplegada en remoto**
+  estaba en una versión **anterior** al código local. El código actual crea un
+  **segundo cliente Supabase admin con `SUPABASE_SERVICE_ROLE_KEY`** y lo usa
+  para las operaciones internas de sincronización (claim/release y
+  actualización de las columnas internas `loyverse_*`), siempre acotadas por
+  el `auth_user_id` ya verificado del JWT. La versión desplegada aún no
+  realizaba esas escrituras con ese cliente admin, lo que provocaba el
+  `permission denied for table customers`.
+- **Corrección:** se volvió a desplegar **solo** `loyverse-customers`
+  (redeploy de la Edge Function; sin cambios de código, migraciones ni
+  configuraciones).
+- **QA real posterior (desde la app, pulsando "Reintentar"):**
+  - desapareció el banner "Falta conectar tu cuenta con la tienda";
+  - el cliente `javier.castro18@tectijuana.edu.mx` quedó con
+    `loyverse_customer_id`:
+    `00a18260-d325-42f2-ad92-fc3071c6cede`;
+  - `loyverse_sync_status` quedó en `synced`;
+  - `loyverse_sync_claim` quedó en `NULL`;
+  - `loyverse_sync_claim_at` quedó en `NULL`;
+  - la UI mostró normalmente la tarjeta del cliente y su QR;
+  - se confirmó que el cliente fue **creado/vinculado correctamente en
+    Loyverse**.
+- **Customer Salmos utilizado:**
+  - ID: `c8cdc890-5953-4e0b-8ef3-868ba9f1165f`
+  - Email: `javier.castro18@tectijuana.edu.mx`
+  - Customer code: `SC-MGWTJ2CK`
+- **Resultado: COMPLETO.**
+
+**Alcance / estado de Git:** este checkpoint es **solo documental**. Los
+cambios existentes en `src/App.jsx`,
+`src/screens/staff/CustomerFound.jsx` y
+`src/services/loyalty/rewardService.js` **no pertenecen a este checkpoint** y
+**NO deben incluirse** en este commit. **Sin commit y sin push.**
 
 ---
 
