@@ -209,7 +209,10 @@ function StaffApp() {
     let cancelled = false;
     authService.getProfile().then((profile) => {
       if (cancelled) return;
-      if (profile && profile.active && profile.role === "staff") {
+      // En real /Staff acepta staff y admin; en demo se mantiene staff (PIN mock).
+      const allowedRole =
+        profile?.role === "staff" || (!authService.isDemoMode && profile?.role === "admin");
+      if (profile && profile.active && allowedRole) {
         setStaffSession({ staff: { id: profile.id, name: profile.name || "Equipo", role: profile.role } });
       } else {
         setStaffSession(null);

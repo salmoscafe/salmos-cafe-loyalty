@@ -10,13 +10,17 @@ import { PrimaryButton, Field } from "../common/ui.jsx";
 //
 // Flujo real:
 //   email + contraseña → Supabase Auth → getProfile()
-//   profile.role === requiredRole && profile.active → onSignedIn
+//   profile.role ∈ (allowedRoles ?? [requiredRole]) && profile.active → onSignedIn
 //   Cualquier otra cosa → denegado.
 //
 // Flujo demo (authService.isDemoMode):
-//   PIN → mockAuthService.signInStaff() → staffProfiles
+//   PIN → mockAuthService.signInStaff() → staffProfiles (solo requiredRole)
 // ---------------------------------------------------------------
-export function RoleLoginScreen({ requiredRole, title, subtitle, demoHint, onSignedIn }) {
+export function RoleLoginScreen({ requiredRole, allowedRoles, title, subtitle, demoHint, onSignedIn }) {
+  // Roles aceptados en modo REAL. Por defecto, solo `requiredRole`.
+  // El modo demo conserva `requiredRole` (los PIN mock no cambian).
+  const realRoles = Array.isArray(allowedRoles) && allowedRoles.length ? allowedRoles : [requiredRole];
+
   const [pin, setPin] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -60,8 +64,8 @@ export function RoleLoginScreen({ requiredRole, title, subtitle, demoHint, onSig
       setError("Tu cuenta está desactivada. Contacta a un administrador.");
       return;
     }
-    if (profile.role !== requiredRole) {
-      setError(`Este acceso es para el rol ${requiredRole}. Tu cuenta no está autorizada.`);
+    if (!realRoles.includes(profile.role)) {
+      setError(`Este acceso es para el rol ${realRoles.join(" o ")}. Tu cuenta no está autorizada.`);
       return;
     }
     onSignedIn({ id: profile.id, name: profile.name || email.split("@")[0], role: profile.role });
