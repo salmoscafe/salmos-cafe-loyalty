@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+﻿import React, { useEffect, useState } from "react";
 import { Icon } from "../../components/common/icons.jsx";
 import { rewardService, REQUIRED_VISITS, authService } from "../../services/index.js";
 import { PrimaryButton, SecondaryButton, Spinner } from "../../components/common/ui.jsx";
@@ -43,12 +43,24 @@ export function CustomerFoundScreen({ result, staff, onBack, onRegisterSale, onR
   async function handleRedeem() {
     setRedeeming(true);
     setRedeemError(null);
-    const res = await rewardService.redeemReward({ cardId: card.id, actorId: staff.id, actorRole: staff.role });
+
+    const res = isDemo
+      ? await rewardService.redeemReward({
+          cardId: card.id,
+          actorId: staff.id,
+          actorRole: staff.role,
+        })
+      : await rewardService.redeemReward({
+          rewardId: shownReward?.id,
+        });
+
     setRedeeming(false);
+
     if (!res.ok) {
       setRedeemError(res.error);
       return;
     }
+
     onRedeemed(res);
   }
 
@@ -108,8 +120,8 @@ export function CustomerFoundScreen({ result, staff, onBack, onRegisterSale, onR
         <div className="sc-found-hint">
           <Icon.Gift className="sc-icon" />
           <p>
-            El QR de Salmos se usa para validar la identidad y la recompensa del cliente. El canje
-            (Claim/OTP/Redeem) se implementa en un siguiente paso.
+            El QR de Salmos se usa para validar la identidad y la recompensa del cliente. Después de confirmar
+            la recompensa, aplica el beneficio correspondiente en Loyverse.
           </p>
         </div>
       )}
@@ -141,14 +153,13 @@ export function CustomerFoundScreen({ result, staff, onBack, onRegisterSale, onR
       {redeemError && <p className="sc-login__error">{redeemError}</p>}
 
       {isDemo && (
-        <>
-          <PrimaryButton onClick={onRegisterSale}>Registrar compra</PrimaryButton>
-          {shownReward && (
-            <SecondaryButton onClick={handleRedeem} disabled={redeeming}>
-              {redeeming ? "Canjeando…" : "Canjear recompensa"}
-            </SecondaryButton>
-          )}
-        </>
+        <PrimaryButton onClick={onRegisterSale}>Registrar compra</PrimaryButton>
+      )}
+
+      {shownReward && (
+        <SecondaryButton onClick={handleRedeem} disabled={redeeming}>
+          {redeeming ? "Canjeando…" : "Canjear recompensa"}
+        </SecondaryButton>
       )}
     </div>
   );

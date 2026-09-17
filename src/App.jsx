@@ -299,7 +299,24 @@ function StaffApp() {
             staff={staff}
             onBack={() => setScreen("scanner")}
             onRegisterSale={() => setScreen("sale")}
-            onRedeemed={({ newCycle }) => setFound((f) => ({ ...f, cycle: newCycle }))}
+            onRedeemed={(res) =>
+              setFound((f) => ({
+                ...f,
+                cycle: {
+                  ...(f.cycle || {}),
+                  id: res.new_cycle_id,
+                  cycle_number: res.new_cycle_number,
+                  active: true,
+                },
+                progress: {
+                  visits: 0,
+                  required: f.progress?.required ?? f.cycle?.required_visits ?? 7,
+                  remaining: f.progress?.required ?? f.cycle?.required_visits ?? 7,
+                  unlocked: false,
+                },
+                reward: null,
+              }))
+            }
           />
         )}
 
