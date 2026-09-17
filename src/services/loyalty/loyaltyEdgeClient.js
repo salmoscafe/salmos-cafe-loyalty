@@ -1,18 +1,19 @@
 // ---------------------------------------------------------------
 // loyaltyEdgeClient — única puerta del frontend hacia la Edge Function
-// `loyalty-engine` (CP3.1: Customer Lookup real).
+// `loyalty-engine`, para las operaciones reales que hoy están
+// soportadas:
+//   * `lookup` — Customer Lookup real (CP3.1): cliente por token de QR.
+//   * `redeem` — canje de recompensa real (rewardService.redeemReward):
+//     { operation: "redeem", rewardId }.
 //
 // Seguridad:
 //   * Se autentica con el JWT de la sesión (Authorization header); la
-//     Edge revalida la sesión con auth.getUser y resuelve el rol desde
-//     public.profiles con service_role (lado servidor). El frontend
-//     jamás ve la clave de servicio.
-//   * El rol del usuario NO viaja en el payload: la Edge lo fuerza
-//     server-side. role='customer' desde el cliente es rechazado.
-//
-// Este cliente SOLO hace lookup (lectura de un cliente por token de
-// QR). Las mutaciones (visit/cancel/redeem) siguen viviendo en las
-// RPCs vía el motor real — no se invocan desde aquí en CP3.1.
+//     Edge revalida la sesión con auth.getUser y resuelve el rol/actor
+//     desde public.profiles con service_role (lado servidor). El
+//     frontend jamás ve la clave de servicio (service_role).
+//   * El actor y su rol NO viajan en el payload: la Edge los fuerza
+//     server-side. El frontend nunca envía actorId ni actorRole;
+//     role='customer' desde el cliente es rechazado.
 // ---------------------------------------------------------------
 
 import { supabaseClient, isSupabaseConfigured } from "../../lib/supabase/client.js";
@@ -30,7 +31,8 @@ export function loyaltyEngineFunctionUrl() {
   return null;
 }
 
-// `payload` = { operation: 'lookup', token: 'SC-XXXXXXXX' }.
+// `payload` = { operation: 'lookup', token: 'SC-XXXXXXXX' }
+//          o { operation: 'redeem', rewardId: '<uuid>' }.
 export async function callLoyaltyEdge(payload) {
   if (!isSupabaseConfigured) {
     return { ok: false, code: "loyalty_unavailable", retriable: true };
