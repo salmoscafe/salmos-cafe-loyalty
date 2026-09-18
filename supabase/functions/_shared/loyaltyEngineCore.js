@@ -41,7 +41,13 @@ export const BUSINESS_TIMEZONE = "America/Tijuana";
 // Operaciones expuestas por la Edge Function.
 // Está `lookup` porque es LECTURA (la usa Staff para consultar el progreso):
 // sigue siendo server-side con service_role, pero NO muta nada y NO va a una RPC.
-export const OPERATIONS = Object.freeze(["visit", "cancel", "redeem", "lookup"]);
+// `claim_start` pide un OTP de canje: es del CUSTOMER dueño de la recompensa,
+// inserta en reward_claims vía service_role y NO llama a ninguna RPC.
+export const OPERATIONS = Object.freeze(["visit", "cancel", "redeem", "lookup", "claim_start"]);
+
+// TTL del OTP de canje (minutos). Regla de negocio del backend (0016):
+// expires_at = now + 5 min. Nunca depende del reloj del cliente.
+export const OTP_LIFETIME_MINUTES = 5;
 
 // Límite defensivo para el token de búsqueda (customer_code = SC-XXXXXXXX,
 // 12 chars; tope generoso por si mañana el QR se firma con un payload más largo).
@@ -66,7 +72,7 @@ export function errorOf(code, message, status = 400) {
 // ---------------------------------------------------------------
 export function validateOperation(value) {
   if (!OPERATIONS.includes(value)) {
-    return { ok: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel, redeem o lookup.") };
+    return { ok: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel, redeem, lookup o claim_start.") };
   }
   return { ok: true };
 }
@@ -219,6 +225,29 @@ export function validateLookupPayload(payload) {
   return { ok: true, data: { token: token.trim() } };
 }
 
+// claim_start → { rewardId } (solo el CUSTOMER dueño de su propia recompensa).
+// customerId NO se acepta: el cliente se deriva server-side de la sesión
+// JWT (customers.auth_user_id). rewardId debe ser UUID.
+export function validateClaimStartPayload(payload) {
+  if (!isRecord(payload)) {
+    return { ok: false, error: errorOf("INVALID_PAYLOAD", "El cuerpo debe ser un objeto JSON.") };
+  }
+  if (hasOwn(payload, "customerId")) {
+    return {
+      ok: false,
+      error: errorOf("CUSTOMER_ID_NOT_ALLOWED", "customerId no se acepta: el cliente se deriva de la sesión autenticada."),
+    };
+  }
+  const { rewardId } = payload;
+  if (typeof rewardId !== "string" || rewardId.trim() === "") {
+    return { ok: false, error: errorOf("MISSING_REWARD_ID", "rewardId es requerido.") };
+  }
+  if (!isValidUuid(rewardId)) {
+    return { ok: false, error: errorOf("INVALID_UUID", "rewardId debe ser un UUID válido.") };
+  }
+  return { ok: true, data: { rewardId } };
+}
+
 // Validación completa para una operación (campos prohibidos + payload).
 export function validatePayload(operation, body) {
   const opCheck = validateOperation(operation);
@@ -243,8 +272,10 @@ export function validatePayload(operation, body) {
       return validateRedeemPayload(body);
     case "lookup":
       return validateLookupPayload(body);
+    case "claim_start":
+      return validateClaimStartPayload(body);
     default:
-      return { ok: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel, redeem o lookup.") };
+      return { ok: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel, redeem, lookup o claim_start.") };
   }
 }
 
@@ -351,16 +382,30 @@ export function decideActorPolicy({ operation, user, profile }) {
   }
 
   // staff/admin con perfil activo: autorizados (verify server-side).
+  // Excepción: claim_start es del CUSTOMER dueño de su recompensa; el
+  // staff NUNCA pide el OTP en nombre del cliente (código específico).
   if (role === "staff" || role === "admin") {
+    if (operation === "claim_start") {
+      return {
+        allowed: false,
+        error: errorOf("STAFF_CLAIM_START_NOT_ALLOWED", "Solo el cliente puede solicitar el OTP de su propia recompensa.", 403),
+      };
+    }
     return requireVerifiedStaff(profile);
   }
 
-  // customer: las tres operaciones staff-only se deniegan.
+  // customer: claim_start SÍ está permitido (genera el OTP para canjear
+  // su propia recompensa disponible). El resto de operaciones se deniegan.
+  if (operation === "claim_start") {
+    return { allowed: true, actor: { actorId: profile.id, actorRole: role } };
+  }
+
+  // customer: las demás operaciones staff-only se deniegan.
   const denial = CUSTOMER_DENIALS[operation];
   if (denial) {
     return { allowed: false, error: errorOf(denial.code, denial.message, 403) };
   }
-  return { allowed: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel, redeem o lookup.", 400) };
+  return { allowed: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel, redeem, lookup o claim_start.", 400) };
 }
 
 // ---------------------------------------------------------------
@@ -458,6 +503,70 @@ export function buildLookupResult({ customer, cycle, activeVisits, reward, now =
   }
 
   return { customer: customerOut, cycle: cycleOut, progress: progressOut, reward: rewardOut };
+}
+
+// ---------------------------------------------------------------
+// OTP de canje (claim_start) — generación y hash PUROS
+// ---------------------------------------------------------------
+// El OTP es un código de 6 dígitos generado con crypto.getRandomValues
+// (NUNCA Math.random). Se hashea con HMAC-SHA256 usando la pepper del
+// servidor (secreto de despliegue, jamás en el frontend):
+//   otp_hash = `${saltHex}:${hex(HMAC-SHA256(pepper, salt + ":" + otp + ":" + rewardId))}`
+// salt: 16 bytes aleatorios POR claim, embebidos en otp_hash (no se
+// requiere columna extra en 0016). rewardId queda ligado al hash: un
+// OTP generado para una recompensa es inútil para otra.
+// La DB guarda SOLO el hash; el OTP en claro vive únicamente en el
+// cliente (memoria) y en la respuesta HTTPS del claim_start.
+export function randomSaltHex(byteLength = 16) {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function toHex(buffer) {
+  return Array.from(new Uint8Array(buffer))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+// 6 dígitos 000000-999999 con muestreo por rechazo (sin sesgo de módulo).
+export function generateOtpCode() {
+  const bound = 1_000_000;
+  const maxSafe = Math.floor(0xffffffff / bound) * bound;
+  let rand;
+  do {
+    const rng = new Uint32Array(1);
+    crypto.getRandomValues(rng);
+    rand = rng[0];
+  } while (rand >= maxSafe);
+  return String(rand % bound).padStart(6, "0");
+}
+
+export async function hashOtp({ otp, rewardId, pepper, salt = randomSaltHex() }) {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(pepper),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(`${salt}:${otp}:${rewardId}`));
+  return `${salt}:${toHex(signature)}`;
+}
+
+// expires_at del claim: ahora + OTP_LIFETIME_MINUTES. `now` inyectable
+// para pruebas; en producción pasa new Date() del lado de la Edge.
+export function getOtpExpiry(now = new Date(), lifetimeMinutes = OTP_LIFETIME_MINUTES) {
+  return new Date(now.getTime() + lifetimeMinutes * 60 * 1000);
+}
+
+// Respuesta de contrato (nunca incluye otp_hash):
+//   { ok, rewardId, otp, expiresAt }
+export function buildClaimStartResponse({ rewardId, otp, expiresAt }) {
+  return { ok: true, rewardId, otp, expiresAt };
 }
 
 // ---------------------------------------------------------------

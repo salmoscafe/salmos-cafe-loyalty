@@ -5,6 +5,8 @@
 //   Frontend futuro → loyalty-engine → JWT validation → profile lookup
 //   (public.profiles vía service_role) → actor policy → RPCs
 //   (register_visit / cancel_visit / redeem_reward) → PostgreSQL
+//   claim_start NO va a una RPC: inserta en reward_claims (0016) con
+//   service_role y devuelve el OTP en claro al customer dueño.
 //
 // La función es una capa de validación y ENVOLTURA, NO la fuente de
 // verdad de las reglas de negocio. Las reglas ($50, 1 visita/día,
@@ -29,19 +31,24 @@
 //     jamás es VITE_*, jamás existe en src/ ni en el bundle.
 //
 // Despliegue: supabase functions deploy loyalty-engine
-// Vars: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
+// Vars: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
+//       LOYALTY_OTP_PEPPER (obligatoria para claim_start; fail-closed).
 // ---------------------------------------------------------------
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import {
   BUSINESS_TIMEZONE,
+  buildClaimStartResponse,
   buildErrorResponseBody,
   buildLookupResult,
   buildResponseBody,
   buildRpcArgs,
   decideActorPolicy,
   decideLookupPolicy,
+  generateOtpCode,
   getBusinessDate,
+  getOtpExpiry,
+  hashOtp,
   isFutureDate,
   isValidUuid,
   mapRpcError,
@@ -68,6 +75,8 @@ function json(body, status = 200) {
 // Nombre real de la RPC según la operación (firmas de 0005).
 // `lookup` NO tiene RPC: es una LECTURA staff-only que hace la Edge
 // con service_role leyendo customers/cycles/visits/rewards (CP3.1).
+// `claim_start` NO tiene RPC: pide el OTP del CUSTOMER dueño de su
+// recompensa e inserta en reward_claims (0016) con service_role.
 const RPC_BY_OPERATION = {
   visit: "register_visit",
   cancel: "cancel_visit",
@@ -160,6 +169,96 @@ async function serveLookup(serviceClient, token) {
     return json(result, 200);
   } catch {
     return json(buildErrorResponseBody("INTERNAL", "No se pudo consultar el cliente. Intenta nuevamente."), 500);
+  }
+}
+
+// ---------------------------------------------------------------
+// serveClaimStart — el CUSTOMER pide el OTP de su propia recompensa.
+//   * Actor: la política ya garantizó customer (el profile se resolvió
+//     antes con service_role). El customerId de reward_claims se deriva
+//     aquí de customers.auth_user_id = user.id: jamás del payload.
+//   * Recompensa: se valida existencia, propiedad, status 'available' y
+//     expires_at futuro con service_role (RLS de rewards es solo-lectura).
+//   * Cancelación previa: cualquier claim 'pending' del mismo reward se
+//     pasa a 'cancelled' antes de insertar (el índice parcial
+//     reward_claims_one_pending_per_reward_idx de 0016 garantiza a lo
+//     sumo un pending por reward; el 23505 se mapea a conflicto).
+//   * OTP: 6 dígitos en claro generados en servidor y SOLO se devuelven
+//     al cliente autenticado que pide su propia recompensa. En la DB va
+//     el hash HMAC-SHA256 con la pepper LOYALTY_OTP_PEPPER (fail-closed:
+//     si la pepper falta, 503 — nunca se genera OTP sin hashear).
+//   * Respuesta de contrato: { ok, rewardId, otp, expiresAt } — NUNCA
+//     otp_hash (ese hash solo existe en reward_claims vía service_role).
+// ---------------------------------------------------------------
+async function serveClaimStart({ serviceClient, userId, rewardId, pepper, now }) {
+  try {
+    const { data: customer, error: customerError } = await serviceClient
+      .from("customers")
+      .select("id")
+      .eq("auth_user_id", userId)
+      .maybeSingle();
+    if (customerError) throw customerError;
+    if (!customer) {
+      return json(buildErrorResponseBody("CUSTOMER_NOT_FOUND", "Cliente no encontrado."), 404);
+    }
+
+    const { data: reward, error: rewardError } = await serviceClient
+      .from("rewards")
+      .select("id, customer_id, status, expires_at")
+      .eq("id", rewardId)
+      .maybeSingle();
+    if (rewardError) throw rewardError;
+    if (!reward) {
+      return json(buildErrorResponseBody("REWARD_NOT_FOUND", "Recompensa no encontrada."), 404);
+    }
+    if (reward.customer_id !== customer.id) {
+      return json(buildErrorResponseBody("REWARD_NOT_OWNED", "Esta recompensa no te pertenece."), 403);
+    }
+    if (reward.status === "redeemed") {
+      return json(buildErrorResponseBody("REWARD_ALREADY_REDEEMED", "Esta recompensa ya fue canjeada."), 400);
+    }
+    if (reward.status !== "available") {
+      return json(buildErrorResponseBody("REWARD_NOT_AVAILABLE", "Esta recompensa ya no está disponible."), 400);
+    }
+    if (new Date(reward.expires_at).getTime() <= now.getTime()) {
+      return json(buildErrorResponseBody("REWARD_EXPIRED", "Esta recompensa ya venció."), 400);
+    }
+
+    // Un solo claim 'pending' por reward (constraint de 0016): cancelar
+    // el anterior si existe deja paso al nuevo OTP.
+    const { error: cancelError } = await serviceClient
+      .from("reward_claims")
+      .update({ status: "cancelled" })
+      .eq("reward_id", rewardId)
+      .eq("status", "pending");
+    if (cancelError) throw cancelError;
+
+    const otp = generateOtpCode();
+    const otpHash = await hashOtp({ otp, rewardId, pepper });
+    const expiresAt = getOtpExpiry(now);
+
+    const { error: insertError } = await serviceClient
+      .from("reward_claims")
+      .insert({
+        reward_id: rewardId,
+        customer_id: customer.id,
+        otp_hash: otpHash,
+        expires_at: expiresAt.toISOString(),
+        status: "pending",
+      });
+    if (insertError) {
+      if (insertError.code === "23505") {
+        return json(
+          buildErrorResponseBody("CLAIM_PENDING_CONFLICT", "Ya existe una solicitud de OTP en curso para esta recompensa."),
+          409
+        );
+      }
+      throw insertError;
+    }
+
+    return json(buildClaimStartResponse({ rewardId, otp, expiresAt: expiresAt.toISOString() }), 200);
+  } catch {
+    return json(buildErrorResponseBody("INTERNAL", "No se pudo generar el OTP. Intenta nuevamente."), 500);
   }
 }
 
@@ -270,6 +369,24 @@ Deno.serve(async (req) => {
     // poder leer el cliente por QR aunque el Staff no sea el dueño.
     if (operation === "lookup") {
       return await serveLookup(serviceClient, payloadCheck.data.token);
+    }
+
+    // claim_start: el CUSTOMER pide el OTP de su recompensa. No es una
+    // RPC (inserta en reward_claims por service_role). Fail-closed:
+    // si LOYALTY_OTP_PEPPER no está definida, 503 — nunca generar un
+    // OTP cuyo hash se calcularía con pepper vacía.
+    if (operation === "claim_start") {
+      const pepper = Deno.env.get("LOYALTY_OTP_PEPPER") || "";
+      if (!pepper) {
+        return json(buildErrorResponseBody("SRV_NOT_CONFIGURED", "Servicio no configurado."), 503);
+      }
+      return await serveClaimStart({
+        serviceClient,
+        userId: user.id,
+        rewardId: payloadCheck.data.rewardId,
+        pepper,
+        now: new Date(),
+      });
     }
 
     // ---------------------------------------------------------------
