@@ -421,11 +421,14 @@ test("SUPABASE_SERVICE_ROLE_KEY no se filtra en src/ ni en el core (lookup inclu
   }
 });
 
-test("la Edge Function lee la service role key solo por Deno.env.get (lookup preservado)", () => {
+test("la Edge Function lee las API keys nuevas del entorno (lookup preservado)", () => {
   const edge = readFileSync(join(REPO_ROOT, "supabase/functions/loyalty-engine/index.ts"), "utf8");
-  const readAsEnv = edge.includes('Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")');
-  assert.equal(readAsEnv, true);
-  assert.equal(/SUPABASE_SERVICE_ROLE_KEY\s*[:=]\s*["'][^"']+["']/.test(edge), false);
+  assert.equal(edge.includes('Deno.env.get("SUPABASE_SECRET_KEYS")'), true);
+  assert.equal(edge.includes('Deno.env.get("SUPABASE_PUBLISHABLE_KEYS")'), true);
+  assert.equal(/SUPABASE_SECRET_KEYS\s*[:=]\s*["'][A-Za-z0-9_-]{20,}["']/.test(edge), false);
+  assert.equal(/SUPABASE_PUBLISHABLE_KEYS\s*[:=]\s*["'][A-Za-z0-9_-]{20,}["']/.test(edge), false);
+  assert.equal(edge.includes("SUPABASE_SERVICE_ROLE_KEY"), false);
+  assert.equal(edge.includes("SUPABASE_ANON_KEY"), false);
 });
 
 test("verify_jwt = true sigue configurado para loyalty-engine en config.toml", () => {

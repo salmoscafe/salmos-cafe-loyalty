@@ -19,16 +19,17 @@
 //   * El role del empleado creado SIEMPRE es 'staff': si el cliente
 //     envía role='admin' se rechaza (ROLE_NOT_ALLOWED).
 //   * La creación de usuarios usa la Admin Auth API (service_role):
-//     SUPABASE_SERVICE_ROLE_KEY vive SOLO aquí, nunca en src/ ni en el
+//     SUPABASE_SECRET_KEYS vive SOLO aquí, nunca en src/ ni en el
 //     bundle. El navegador jamás la ve.
 //   * Idempotencia: si el email ya existe, se responde
 //     email_already_exists (409) sin crear cuenta ni segundo perfil.
 //
 // Despliegue: supabase functions deploy admin-employees
-// Vars: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
+// Vars: SUPABASE_URL, SUPABASE_PUBLISHABLE_KEYS, SUPABASE_SECRET_KEYS
 // ---------------------------------------------------------------
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { readDefaultKey } from "../_shared/supabaseKeys.js";
 import {
   buildEmployeeList,
   requireAdmin,
@@ -73,28 +74,31 @@ async function parseJson(req) {
 // Crea la cuenta Auth (Admin API) y el perfil staff, de forma atómica
 // frente a duplicados: `email_already_exists` se traduce a 409 sin
 // tocar profiles.
-async function createEmployee({ auth, serviceClient, data }) {
+async function createEmployee({ serviceClient, data }) {
   const { email, password, name } = data;
 
-  let created;
-  try {
-    created = await auth.auth.admin.createUser({
-      email,
-      password,
-      email_confirm: true,
-      user_metadata: { name },
-    });
-  } catch (error) {
-    const msg = String(error?.message || "").toLowerCase();
-    const code = String(error?.code || "").toLowerCase();
-    if (/already registered|email already in use|exists/.test(msg) || code === "user_already_exists") {
+  const { data: created, error: createError } = await serviceClient.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+    user_metadata: { name },
+  });
+
+  if (createError) {
+    const msg = String(createError.message || "").toLowerCase();
+    const code = String(createError.code || "").toLowerCase();
+    if (
+      /already registered|email already in use|exists/.test(msg) ||
+      code === "user_already_exists" ||
+      code === "email_exists"
+    ) {
       return {
         ok: false,
         status: 409,
         body: { ok: false, code: "email_already_exists", message: "Ese correo ya está registrado. No se creó una segunda cuenta.", retriable: false },
       };
     }
-    throw error;
+    throw createError;
   }
 
   const userId = created?.user?.id;
@@ -118,7 +122,7 @@ async function createEmployee({ auth, serviceClient, data }) {
   };
 }
 
-async function listEmployees({ supabase, serviceClient }) {
+async function listEmployees({ serviceClient }) {
   // Empleados = perfiles con role='staff'. El admin NO se lista ni se
   // gestiona desde esta pantalla (V1). El email se une con la Admin API.
   const { data: profiles, error: profilesError } = await serviceClient
@@ -128,7 +132,8 @@ async function listEmployees({ supabase, serviceClient }) {
   if (profilesError) throw profilesError;
 
   // Emails: GoTrue (Admin API). El navegador no debe leer auth.users.
-  const { data: page } = await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 });
+  const { data: page, error: usersError } = await serviceClient.auth.admin.listUsers({ page: 1, perPage: 1000 });
+  if (usersError) throw usersError;
   const users = page?.users || [];
 
   return {
@@ -138,7 +143,7 @@ async function listEmployees({ supabase, serviceClient }) {
   };
 }
 
-async function updateEmployee({ auth, serviceClient, data }) {
+async function updateEmployee({ serviceClient, data }) {
   const { employeeId, name, active } = data;
 
   // Solo perfiles role='staff' son gestionables: un `employeeId` de un
@@ -167,7 +172,7 @@ async function updateEmployee({ auth, serviceClient, data }) {
   // Email para la respuesta (visualización inmediata en la UI).
   let email = "";
   try {
-    const { data: user } = await auth.auth.admin.getUserById(employeeId);
+    const { data: user } = await serviceClient.auth.admin.getUserById(employeeId);
     email = user?.user?.email || "";
   } catch {
     email = "";
@@ -192,8 +197,8 @@ Deno.serve(async (req) => {
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
-  const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
-  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+  const publishableKey = readDefaultKey(Deno.env.get("SUPABASE_PUBLISHABLE_KEYS"));
+  const secretKey = readDefaultKey(Deno.env.get("SUPABASE_SECRET_KEYS"));
 
   try {
     // 1) Autenticación: JWT del usuario.
@@ -203,13 +208,13 @@ Deno.serve(async (req) => {
       return json({ ok: false, code: "unauthorized", message: "Autenticación requerida.", retriable: false }, 401);
     }
 
-    if (!supabaseUrl || !supabaseAnonKey || !serviceRoleKey) {
+    if (!supabaseUrl || !publishableKey || !secretKey) {
       return json({ ok: false, code: "srv_not_configured", message: "Servicio no configurado.", retriable: true }, 503);
     }
 
     // Cliente anon SOLO para validar el usuario (JWT); las mutaciones y
     // lecturas administrativas van por service_role.
-    const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+    const supabase = createClient(supabaseUrl, publishableKey, {
       global: { headers: { Authorization: authHeader } },
       auth: { persistSession: false, autoRefreshToken: false },
     });
@@ -223,7 +228,7 @@ Deno.serve(async (req) => {
     }
 
     // 2) Cliente service_role: rol del actor + operaciones de datos.
-    const serviceClient = createClient(supabaseUrl, serviceRoleKey, {
+    const serviceClient = createClient(supabaseUrl, secretKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
@@ -262,11 +267,11 @@ Deno.serve(async (req) => {
             check.error.status
           );
         }
-        const result = await createEmployee({ auth: supabase, serviceClient, data: check.data });
+        const result = await createEmployee({ serviceClient, data: check.data });
         return json(result.body, result.status);
       }
       case "list": {
-        const result = await listEmployees({ supabase, serviceClient });
+        const result = await listEmployees({ serviceClient });
         return json(result.body, result.status);
       }
       case "update": {
@@ -277,7 +282,7 @@ Deno.serve(async (req) => {
             check.error.status
           );
         }
-        const result = await updateEmployee({ auth: supabase, serviceClient, data: check.data });
+        const result = await updateEmployee({ serviceClient, data: check.data });
         return json(result.body, result.status);
       }
       default:

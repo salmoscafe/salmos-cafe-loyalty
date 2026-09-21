@@ -3,7 +3,7 @@
 // (AuthScreen y compañía), con dos implementaciones intercambiables:
 //
 //   * Sin Supabase configurado → MOCK en memoria (modo demo/dev).
-//   * Con VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY → implementación
+//   * Con VITE_SUPABASE_URL + VITE_SUPABASE_PUBLISHABLE_KEY → implementación
 //     real sobre Supabase Auth (`./auth/supabaseAuthService.js`).
 //
 // Contrato (igual en ambas):

@@ -1,13 +1,65 @@
 # Salmos Café Loyalty — Current Status
 
-Estado del proyecto sobre `main` @ `483eeae`
-(`feat(loyalty): update reward cycle to 7 visits`). Los cambios de las
-pantallas Cliente (Activity/Home/Rewards) están pendientes de stage (ver
-checkpoint "Mejoras UI/copy" abajo). Todo lo documentado aquí fue verificado
+Estado del proyecto sobre `main` @ `d9604c9`
+(`feat(loyalty): complete claim start and redeem e2e checkpoint`). El
+checkpoint de abajo (0016+0017) y la migración de API keys están **pendientes
+de stage/commit** (working tree). Todo lo documentado aquí fue verificado
 contra el código real y el proyecto remoto; nada se da por sentado de la
 documentación.
 
-Última actualización: 2026-09-17.
+Última actualización: 2026-09-21.
+
+---
+
+## Checkpoint — Flujo de redención Claim/OTP/Redeem (0016 + 0017) + migración de API keys
+
+**Fecha:** 21 de septiembre de 2026.
+
+**Objetivo:** cerrar la compuerta OTP del canje end-to-end: el backend exige
+una verificación por Staff/Admin antes de redimir. Sin claim `verified` no hay
+`redeem_reward` posible — la protección vive en la base, no en la UI.
+
+- **`0016_reward_claims.sql`**: tabla `reward_claims` (solo `otp_hash`, nunca
+  el OTP en claro), TTL derivado de `expires_at` (+5 min, sin cron), índices
+  únicos parciales "máximo un pending por reward" y "máximo un verified por
+  reward", RLS de solo lectura para el cliente (sin `otp_hash`).
+- **`0017_reward_claim_otp.sql`**: `public.constant_time_equal(text,text)`
+  (comparación sin cortocircuito por contenido) + RPC `verify_reward_claim`
+  (pending → verified atómico con `verified_at`/`verified_by`, auditoría
+  `CLAIM_VERIFIED`, rechaza reward redimida/cancelada/vencida y claim
+  expirada/ya verificada/ya redimida) y **reemplaza** `redeem_reward` exigiando
+  una claim `verified` (sin ella → `REWARD_NOT_VERIFIED`) y consumiéndola en la
+  MISMA transacción (verified → redeemed). Grants solo a `service_role`.
+- **Edge `loyalty-engine`**: operaciones `claim_start` (el CUSTOMER pide el OTP
+  de SU recompensa; OTP de 6 dígitos con HMAC-SHA256 y la pepper
+  `LOYALTY_OTP_PEPPER`, hash-only en BD, respuesta sin `otp_hash`) y
+  `claim_verify` (solo Staff/Admin; recomputa el candidato con la pepper y
+  delega en `verify_reward_claim`). Fail-closed: sin pepper → 503. `customer`
+  no puede verificar (`CUSTOMER_CLAIM_VERIFY_NOT_ALLOWED` 403) ni staff pedir
+  el OTP en nombre del cliente (`STAFF_CLAIM_START_NOT_ALLOWED` 403).
+- **Admin**: `admin-employees` usa `serviceClient.auth.admin.*`
+  (create/list/update de empleados sin service_role directo).
+- **Migración de API keys de Supabase**: las Edge Functions leen las keys
+  nuevas `SUPABASE_PUBLISHABLE_KEYS` / `SUPABASE_SECRET_KEYS` (dict JSON vía
+  `_shared/supabaseKeys.js` / `readDefaultKey`, fail-closed sin "default"); el
+  frontend usa `VITE_SUPABASE_PUBLISHABLE_KEY`. Las keys legacy
+  (`SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`) siguen presentes en el
+  proyecto pero sin consumidores de código.
+- **Validación (todo real, sin secretos en logs ni en bundle):** `npm test`
+  **432/432**; `npm run build` OK; E2E real admin-employees
+  (list/create/update/no-admin → 200/200/200/403); **E2E real del flujo claim
+  15/15 PASS**: `claim_start` 200 con OTP de 6 dígitos y sin
+  `otp_hash`; customer `claim_verify` 403; staff `claim_verify` 200
+  (verified); staff redeem 200 (ciclo reutilizado); segundo redeem 400
+  `REWARD_ALREADY_REDEEMED`; redeem sin verificar 400 `REWARD_NOT_VERIFIED`;
+  OTP incorrecto 400 `OTP_INVALID` dejando el claim `pending` vivo; OTP
+  expirado 400 `OTP_EXPIRED`; auditoría `CLAIM_VERIFIED`/`REWARD_REDEEMED`
+  (staff) verificada en BD.
+- **Pendiente (UI)**: la pantalla de redención del frontend (customer pide el
+  OTP / staff lo valida en barra) aún no está construida; el backend y su E2E
+  están completos.
+
+**Sin commit y sin push.**
 
 ---
 
@@ -668,9 +720,11 @@ docs/   AUTH_AND_LOYVERSE_FLOW.md · CURRENT_STATUS.md (este documento)
   email dependen de la configuración del proyecto (el código soporta ambos
   modos: `mode: "complete"` vs `"confirm_email"`).
 - `.env.local` (ignorada por git) contiene: `VITE_SUPABASE_URL`,
-  `VITE_SUPABASE_ANON_KEY`, `VITE_LOYVERSE_CUSTOMERS_FUNCTION_URL`.
+  `VITE_SUPABASE_PUBLISHABLE_KEY`, `VITE_LOYVERSE_CUSTOMERS_FUNCTION_URL`
+  (la variable legacy `VITE_SUPABASE_ANON_KEY` ya NO se lee en `src/`;
+  además, su valor local sigue siendo una publishable key, no una legacy).
   `LOYVERSE_ACCESS_TOKEN` **no** está en el frontend (vive solo en la Edge
-  Function).
+  Function). `LOYALTY_OTP_PEPPER` solo en el dashboard de Supabase (Edge).
 
 ## Authentication
 
@@ -845,24 +899,24 @@ resolver para email) porque el anon no puede leer `customers` (RLS).
 
 ## Edge Functions
 
-- Única función: **`loyverse-customers`** (TypeScript, `Deno.serve`).
-- **Desplegada en remoto**: `ACTIVE`, **version 3**, `verify_jwt = true`
-  (verificado con `supabase functions list`; la v3 incluye
-  `syncClaim.js` + el fix `b0351f5`).
-- Variables esperadas en el proyecto: `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
-  `LOYVERSE_ACCESS_TOKEN` (este último solo lado servidor).
-- Operación aceptada: `{ operation: "link_or_create" }`. Respuestas
-  amigables: `already_linked | created | linked | updated | conflict`;
-  errores con `traceId` (`srv_not_configured`, `unauthorized`,
-  `invalid_body`, `invalid_operation`, `loyverse_customer_conflict`,
-  `loyverse_identity_conflict`, `loyverse_sync_in_progress`,
-  `loyverse_unavailable`). Concurrencia: adquiere el claim de `customers`
-  (0006) antes de tocar la API; si otro sync está en curso responde
-  `409 loyverse_sync_in_progress` (`retriable: true`) **sin** llamar a
-  Loyverse, y un perfil ya `synced` responde `already_linked` antes del
-  claim/red.
-- Shared code (`_shared/loyverseCore.js`, `_shared/syncClaim.js`) es agnóstico
-  de Deno → se prueba con `node --test`.
+- Cinco funciones (TypeScript, `Deno.serve`): `loyverse-customers`,
+  `loyverse-receipts-sync`, `send-ticket`, `admin-employees` y
+  `loyalty-engine`; todas desplegadas en remoto (`ACTIVE`).
+- Las Edge Functions leen las **API keys nuevas** de Supabase como dict JSON:
+  `SUPABASE_PUBLISHABLE_KEYS` / `SUPABASE_SECRET_KEYS` (helper
+  `_shared/supabaseKeys.js` / `readDefaultKey`, fail-closed). La `SECRET KEY`
+  jamás es `VITE_*` ni existe en `src/` ni en el bundle.
+- `loyverse-customers`: operación `link_or_create`; un **segundo cliente
+  Supabase admin** (service_role) realiza las escrituras internas
+  `loyverse_*` acotadas por el `auth_user_id` ya verificado del JWT.
+- `loyalty-engine`: operaciones `visit`, `cancel`, `redeem`, `lookup`,
+  `claim_start`, `claim_verify` (rol resuelto server-side desde
+  `public.profiles`; nunca del payload). `lookup`/`claim_verify` validan el
+  JWT con la publishable key y mutan con la secret key (`verify_jwt: true`).
+- `admin-employees`: CRUD de empleados con `auth.admin.*` (solo admin).
+- `send-ticket`: usa **solo** la publishable key (no necesita secret).
+- `loyverse-receipts-sync`: solo la secret key (`verify_jwt: false`; lo
+  invoca el cron con `x-sync-secret`).
 
 ## Database Migrations
 
@@ -874,6 +928,10 @@ resolver para email) porque el anon no puede leer `customers` (RLS).
 | `0004_loyverse_updated_event.sql` | Amplía la CHECK de `customer_sync_events.event_type` para permitir `loyverse_updated` (drop + add del constraint) | Remoto ✅ |
 | `0005_loyalty_engine.sql` | `assert_loyalty_actor` + RPCs de lealtad (`register_visit`/`cancel_visit`/`redeem_reward`), grants solo `service_role` | Remoto ✅ |
 | `0006_loyverse_sync_claim.sql` | Claim atómico de sync Loyverse: `customers.loyverse_sync_claim` (uuid) + `customers.loyverse_sync_claim_at` (timestamptz); sin cambios de RLS/grants | Remoto ✅ |
+| `0007_loyverse_receipts_sync.sql` | RPCs y permisos del sync de receipts de Loyverse (idempotencia por `external_sale_id`, conteo de progreso, fecha de negocio Tijuana) | Remoto ✅ |
+| `0013_profiles_roles.sql` | `profiles` con roles `customer|staff|admin` (+ trigger por usuario autenticado) | Remoto ✅ |
+| `0016_reward_claims.sql` | `reward_claims` (solo `otp_hash`, TTL 5 min, índices únicos parciales pending/verified, RLS de solo lectura) | Remoto ✅ |
+| `0017_reward_claim_otp.sql` | `constant_time_equal` + `verify_reward_claim` (pending → verified) + `redeem_reward` exigiendo claim `verified` | Remoto ✅ |
 
 Regla: **no** crear una migración nueva para reemplazar 0003 (ya aplicada en
 remoto); los cambios van en `0004+` (esta Fase C usa `0004`; el claim de

@@ -43,11 +43,24 @@ export const BUSINESS_TIMEZONE = "America/Tijuana";
 // sigue siendo server-side con service_role, pero NO muta nada y NO va a una RPC.
 // `claim_start` pide un OTP de canje: es del CUSTOMER dueño de la recompensa,
 // inserta en reward_claims vía service_role y NO llama a ninguna RPC.
-export const OPERATIONS = Object.freeze(["visit", "cancel", "redeem", "lookup", "claim_start"]);
+// `claim_verify` valida el OTP: es de Staff/Admin y va a la RPC
+// verify_reward_claim (0017), que hace pending → verified.
+export const OPERATIONS = Object.freeze([
+  "visit",
+  "cancel",
+  "redeem",
+  "lookup",
+  "claim_start",
+  "claim_verify",
+]);
 
 // TTL del OTP de canje (minutos). Regla de negocio del backend (0016):
 // expires_at = now + 5 min. Nunca depende del reloj del cliente.
 export const OTP_LIFETIME_MINUTES = 5;
+
+// OTP: exactamente 6 dígitos (000000-999999). La Edge solo valida formato;
+// la comparación real (HMAC en tiempo constante) la hace la RPC 0017.
+export const OTP_CODE_RE = /^\d{6}$/;
 
 // Límite defensivo para el token de búsqueda (customer_code = SC-XXXXXXXX,
 // 12 chars; tope generoso por si mañana el QR se firma con un payload más largo).
@@ -72,7 +85,7 @@ export function errorOf(code, message, status = 400) {
 // ---------------------------------------------------------------
 export function validateOperation(value) {
   if (!OPERATIONS.includes(value)) {
-    return { ok: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel, redeem, lookup o claim_start.") };
+    return { ok: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel, redeem, lookup, claim_start o claim_verify.") };
   }
   return { ok: true };
 }
@@ -248,6 +261,50 @@ export function validateClaimStartPayload(payload) {
   return { ok: true, data: { rewardId } };
 }
 
+// claim_verify → { rewardId, otp } (solo Staff/Admin).
+// customerId NO se acepta: el actor se deriva de la sesión. El OTP debe
+// ser EXACTAMENTE 6 dígitos; el formato se valida aquí, la comparación
+// criptográfica la hace la RPC verify_reward_claim (0017).
+export function validateClaimVerifyPayload(payload) {
+  if (!isRecord(payload)) {
+    return { ok: false, error: errorOf("INVALID_PAYLOAD", "El cuerpo debe ser un objeto JSON.") };
+  }
+  if (hasOwn(payload, "customerId")) {
+    return {
+      ok: false,
+      error: errorOf("CUSTOMER_ID_NOT_ALLOWED", "customerId no se acepta: el actor se deriva de la sesión autenticada."),
+    };
+  }
+  const { rewardId, otp } = payload;
+  if (typeof rewardId !== "string" || rewardId.trim() === "") {
+    return { ok: false, error: errorOf("MISSING_REWARD_ID", "rewardId es requerido.") };
+  }
+  if (!isValidUuid(rewardId)) {
+    return { ok: false, error: errorOf("INVALID_UUID", "rewardId debe ser un UUID válido.") };
+  }
+  if (typeof otp !== "string" || !OTP_CODE_RE.test(otp)) {
+    return { ok: false, error: errorOf("INVALID_OTP", "El código OTP debe tener exactamente 6 dígitos.") };
+  }
+  return { ok: true, data: { rewardId, otp } };
+}
+
+// Formato del hash almacenado en reward_claims.otp_hash (0016/claim_start):
+//   `${saltHex:32}:${hmacHex:64}`  → 97 chars.
+// La Edge extrae el salt para recomputar el HMAC con la pepper sin tener
+// que guardar el salt en una columna aparte.
+const OTP_HASH_RE = /^[0-9a-f]{32}:[0-9a-f]{64}$/i;
+
+export function isValidOtpHashFormat(otpHash) {
+  return typeof otpHash === "string" && OTP_HASH_RE.test(otpHash);
+}
+
+// Extrae el salt (parte previa a ':') de un otp_hash válido. Devuelve
+// null si el formato no es el esperado (nunca se inventa un salt).
+export function extractOtpSalt(otpHash) {
+  if (!isValidOtpHashFormat(otpHash)) return null;
+  return otpHash.slice(0, otpHash.indexOf(":"));
+}
+
 // Validación completa para una operación (campos prohibidos + payload).
 export function validatePayload(operation, body) {
   const opCheck = validateOperation(operation);
@@ -274,8 +331,10 @@ export function validatePayload(operation, body) {
       return validateLookupPayload(body);
     case "claim_start":
       return validateClaimStartPayload(body);
+    case "claim_verify":
+      return validateClaimVerifyPayload(body);
     default:
-      return { ok: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel, redeem, lookup o claim_start.") };
+      return { ok: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel, redeem, lookup, claim_start o claim_verify.") };
   }
 }
 
@@ -361,6 +420,10 @@ const CUSTOMER_DENIALS = {
   cancel: { code: "CUSTOMER_CANCEL_NOT_ALLOWED", message: "Un cliente no puede cancelar visitas." },
   redeem: { code: "CUSTOMER_REDEEM_NOT_ALLOWED", message: "Un cliente no puede redimir recompensas." },
   lookup: { code: "CUSTOMER_LOOKUP_NOT_ALLOWED", message: "Un cliente no puede consultar clientes." },
+  claim_verify: {
+    code: "CUSTOMER_CLAIM_VERIFY_NOT_ALLOWED",
+    message: "Un cliente no puede verificar códigos OTP.",
+  },
 };
 
 // Política completa: decide quién puede ejecutar cada operación.
@@ -405,7 +468,7 @@ export function decideActorPolicy({ operation, user, profile }) {
   if (denial) {
     return { allowed: false, error: errorOf(denial.code, denial.message, 403) };
   }
-  return { allowed: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel, redeem, lookup o claim_start.", 400) };
+  return { allowed: false, error: errorOf("INVALID_OPERATION", "Operación no válida. Use visit, cancel, redeem, lookup, claim_start o claim_verify.", 400) };
 }
 
 // ---------------------------------------------------------------
@@ -609,8 +672,20 @@ export function buildRedeemRewardArgs(data, actor) {
   };
 }
 
+// claim_verify → verify_reward_claim(...)  (0017)
+// `data.candidateHash` NO viene del payload: lo computa la Edge con la
+// pepper (nunca cruza al cliente ni a Postgres como secreto).
+export function buildVerifyClaimArgs(data, actor) {
+  return {
+    p_reward_id: data.rewardId,
+    p_candidate_hash: data.candidateHash,
+    p_actor_id: actor.actorId,
+    p_actor_role: actor.actorRole,
+  };
+}
+
 // Despacho genérico. opts para visit: { visitDate, actor, source? };
-// para cancel/redeem: { actor }.
+// para cancel/redeem: { actor }; para claim_verify: { actor }.
 export function buildRpcArgs(operation, data, opts = {}) {
   switch (operation) {
     case "visit":
@@ -619,6 +694,8 @@ export function buildRpcArgs(operation, data, opts = {}) {
       return buildCancelVisitArgs(data, opts.actor);
     case "redeem":
       return buildRedeemRewardArgs(data, opts.actor);
+    case "claim_verify":
+      return buildVerifyClaimArgs(data, opts.actor);
     default:
       throw new Error(`Operación sin RPC: ${operation}`);
   }
@@ -630,12 +707,36 @@ export function buildRpcArgs(operation, data, opts = {}) {
 // No se exponen stack traces, ni SQL, ni details/hint de PostgREST.
 // El `message` de las RPC D1.1 (raise exception ... errcode P0001) ya
 // es el mensaje de negocio en español y es seguro de devolver.
+//
+// 0017: las RPC de OTP adjuntan un HINT estable (p. ej. 'OTP_INVALID')
+// que se usa como código de error específico SOLO si está en la lista
+// blanca. Un hint desconocido (o ausente) cae al genérico RPC_REJECTED:
+// nunca se reenvía un hint arbitrario al cliente.
+export const LOYALTY_RPC_HINTS = Object.freeze([
+  "OTP_INVALID",
+  "OTP_EXPIRED",
+  "CLAIM_NOT_FOUND",
+  "CLAIM_ALREADY_VERIFIED",
+  "CLAIM_ALREADY_REDEEMED",
+  "REWARD_NOT_FOUND",
+  "REWARD_ALREADY_REDEEMED",
+  "REWARD_NOT_AVAILABLE",
+  "REWARD_EXPIRED",
+  "REWARD_NOT_VERIFIED",
+]);
+const LOYALTY_RPC_HINTS_SET = new Set(LOYALTY_RPC_HINTS);
+
 export function mapRpcError(error) {
   const code = error?.code;
   const message = error?.message || "Error interno de la operación.";
 
   if (code === "P0001") {
     // Excepción controlada del PL/pgSQL: mensaje de negocio de la RPC.
+    // El hint (lista blanca) da un código específico; si no, genérico.
+    const hint = error?.hint;
+    if (typeof hint === "string" && LOYALTY_RPC_HINTS_SET.has(hint)) {
+      return { code: hint, message, status: 400 };
+    }
     return { code: "RPC_REJECTED", message, status: 400 };
   }
   if (code === "42501") {

@@ -20,7 +20,7 @@
 //     simula el envío.
 //
 // Despliegue: supabase functions deploy send-ticket
-// Vars: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
+// Vars: SUPABASE_URL, SUPABASE_PUBLISHABLE_KEYS,
 //       SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_SENDER_EMAIL,
 //       SMTP_SENDER_NAME, SMTP_APP_URL (opcional, solo para el CTA)
 // ---------------------------------------------------------------
@@ -37,6 +37,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import nodemailer from "npm:nodemailer@^9";
 import { computeCycleVisitProgress, renderTicketEmail } from "../_shared/ticketEmail.js";
 import { resolveSmtpPort } from "../_shared/smtpConn.js";
+import { readDefaultKey } from "../_shared/supabaseKeys.js";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -65,8 +66,8 @@ Deno.serve(async (req) => {
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
-  const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
-  if (!supabaseUrl || !supabaseAnonKey) {
+  const publishableKey = readDefaultKey(Deno.env.get("SUPABASE_PUBLISHABLE_KEYS"));
+  if (!supabaseUrl || !publishableKey) {
     return json({ ok: false, code: "srv_not_configured", retriable: true }, 503);
   }
 
@@ -75,7 +76,7 @@ Deno.serve(async (req) => {
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
     if (!token) return json({ ok: false, code: "unauthorized", retriable: false }, 401);
 
-    const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+    const supabase = createClient(supabaseUrl, publishableKey, {
       global: { headers: { Authorization: authHeader } },
       auth: { persistSession: false, autoRefreshToken: false },
     });

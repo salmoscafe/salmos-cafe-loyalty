@@ -12,7 +12,7 @@
 //     protección es un secreto compartido (`x-sync-secret` ==
 //     SYNC_CRON_SECRET) que solo conoce el scheduler y esta función.
 //     verify_jwt = false en supabase/config.toml (sección nueva).
-//   * Todo el acceso a la BD va con SUPABASE_SERVICE_ROLE_KEY (lado
+//   * Todo el acceso a la BD va con SUPABASE_SECRET_KEYS (lado
 //     servidor, jamás VITE_*, jamás en el bundle). Las RPCs tienen
 //     grants exclusivos de service_role (0005/0007); loyverse_sync_state
 //     y audit_logs son inaccesibles para clientes (RLS sin políticas).
@@ -29,12 +29,13 @@
 //     por vez; el perdedor responde 409 retriable (lease 10 min).
 //
 // Despliegue: supabase functions deploy loyverse-receipts-sync
-// Vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, LOYVERSE_ACCESS_TOKEN,
+// Vars: SUPABASE_URL, SUPABASE_SECRET_KEYS, LOYVERSE_ACCESS_TOKEN,
 //       SYNC_CRON_SECRET
 // ---------------------------------------------------------------
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { acquireSyncClaim, releaseSyncClaim } from "../_shared/syncClaim.js";
+import { readDefaultKey } from "../_shared/supabaseKeys.js";
 import {
   buildCustomerMap,
   buildRegisterVisitWithReceiptArgs,
@@ -362,11 +363,11 @@ Deno.serve(async (req) => {
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
-  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+  const secretKey = readDefaultKey(Deno.env.get("SUPABASE_SECRET_KEYS"));
   const loyverseAccessToken = Deno.env.get("LOYVERSE_ACCESS_TOKEN") || "";
   const syncSecret = Deno.env.get("SYNC_CRON_SECRET") || "";
 
-  if (!supabaseUrl || !serviceRoleKey || !loyverseAccessToken || !syncSecret) {
+  if (!supabaseUrl || !secretKey || !loyverseAccessToken || !syncSecret) {
     return json({ ok: false, code: "srv_not_configured", retriable: true }, 503);
   }
 
@@ -375,7 +376,7 @@ Deno.serve(async (req) => {
     return json({ ok: false, code: "unauthorized", retriable: false }, 401);
   }
 
-  const supabase = createClient(supabaseUrl, serviceRoleKey, {
+  const supabase = createClient(supabaseUrl, secretKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 

@@ -21,12 +21,13 @@
 //     respuestas. Los fallos devuelven códigos amigables.
 //
 // Despliegue: supabase functions deploy loyverse-customers
-// Vars: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
+// Vars: SUPABASE_URL, SUPABASE_PUBLISHABLE_KEYS, SUPABASE_SECRET_KEYS,
 //       LOYVERSE_ACCESS_TOKEN
 // ---------------------------------------------------------------
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { runLoyverseSync } from "../_shared/syncClaim.js";
+import { readDefaultKey } from "../_shared/supabaseKeys.js";
 
 const LOYVERSE_BASE = "https://api.loyverse.com/v1.0/customers";
 const LOYVERSE_PAGE_LIMIT = 250;
@@ -152,11 +153,11 @@ Deno.serve(async (req) => {
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
-  const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
-  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+  const publishableKey = readDefaultKey(Deno.env.get("SUPABASE_PUBLISHABLE_KEYS"));
+  const secretKey = readDefaultKey(Deno.env.get("SUPABASE_SECRET_KEYS"));
   const loyverseAccessToken = Deno.env.get("LOYVERSE_ACCESS_TOKEN") || "";
 
-  if (!loyverseAccessToken || !serviceRoleKey) {
+  if (!loyverseAccessToken || !secretKey) {
     return json({ ok: false, code: "srv_not_configured", retriable: true }, 503);
   }
 
@@ -165,7 +166,7 @@ Deno.serve(async (req) => {
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
     if (!token) return json({ ok: false, code: "unauthorized", retriable: false }, 401);
 
-    const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+    const supabase = createClient(supabaseUrl, publishableKey, {
       global: { headers: { Authorization: authHeader } },
       auth: { persistSession: false, autoRefreshToken: false },
     });
@@ -173,7 +174,7 @@ Deno.serve(async (req) => {
     // Cliente service_role para las escrituras internas loyverse_* (H1).
     // Bypass de RLS deliberado pero acotado: todas las mutaciones van
     // scoped por `user.id` (el auth_user_id YA fue verificado arriba).
-    const admin = createClient(supabaseUrl, serviceRoleKey, {
+    const admin = createClient(supabaseUrl, secretKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 

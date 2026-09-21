@@ -221,4 +221,5 @@ Aceptado y documentado en esta fase; **no se reescribe el flujo de auth ahora**.
   `confirm_email` del registro según el proyecto.
 - Provider **Phone/SMS**: apagado a propósito (sin credenciales Twilio).
 - Desplegar la Edge Function `loyverse-customers` con sus variables
-  (`SUPABASE_URL`, `SUPABASE_ANON_KEY`, `LOYVERSE_ACCESS_TOKEN`).
+  (`SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEYS`, `SUPABASE_SECRET_KEYS`,
+  `LOYVERSE_ACCESS_TOKEN`).

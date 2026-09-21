@@ -165,7 +165,7 @@ El sistema de autenticación de **cliente** está **sustancialmente implementado
 - **Errores amigables**: `authErrors.js` traduce códigos crudos a `{ code, message }` en español; la UI nunca muestra errores de Supabase crudos.
 
 Hallazgos:
-- En modo real sin las variables `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY`, el facade cae al mock (demo) — correcto.
+- En modo real sin las variables `VITE_SUPABASE_URL`/`VITE_SUPABASE_PUBLISHABLE_KEY`, el facade cae al mock (demo) — correcto.
 - `checkSecondaryContact` detecta en caliente si el correo/teléfono ya está en uso (sin abrir RLS), usado al registrarse.
 
 ---
@@ -303,7 +303,7 @@ Riesgos y gaps (con estado):
 
 ### Arquitectura actual (verificada)
 ```
-VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY
+VITE_SUPABASE_URL + VITE_SUPABASE_PUBLISHABLE_KEY
              │ sí
 React UI ──► authService (facade) ──► supabaseAuthService ──► supabase.auth
 (Login/Register/Reset/OTP/NewPwd)        │ (signUp, signInWithPassword,

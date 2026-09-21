@@ -351,7 +351,7 @@ Todas las migraciones viven en `supabase/migrations/`. Se aplican con
 ```bash
 npm install
 npm run dev      # desarrollo (Vite)
-npm test         # 246/246, sin navegador
+npm test         # 432/432, sin navegador
 npm run build    # build de producción
 ```
 
@@ -359,17 +359,18 @@ npm run build    # build de producción
   resuelve la primera ruta del pathname, sin router externo).
 - **Sin `.env`**: la app corre en **modo demo** (auth mock en memoria,
   reglas de loyalty del fallback `mockDatabase`).
-- **Con `.env`** (`VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY`): registro,
+- **Con `.env`** (`VITE_SUPABASE_URL` + `VITE_SUPABASE_PUBLISHABLE_KEY`): registro,
   login y lecturas de lealtad pasan a **Supabase real** (RLS).
 
 Supabase local/remoto:
 
 ```bash
 supabase start                 # stack local (Postgres 17, Studio, Edge)
-supabase db push               # aplica migraciones 0001-0012 (remoto: requiere SUPABASE_DB_PASSWORD)
+supabase db push               # aplica migraciones 0001-0017 (remoto: requiere SUPABASE_DB_PASSWORD)
 supabase functions deploy loyalty-engine
 supabase functions deploy loyverse-customers
 supabase functions deploy loyverse-receipts-sync
+supabase functions deploy admin-employees
 supabase functions deploy send-ticket
 ```
 
@@ -391,10 +392,12 @@ placeholders; los valores reales viven solo en `.env` (**gitignored**).
 | Variable | Dónde | Rol |
 |---|---|---|
 | `VITE_SUPABASE_URL` | Frontend (pública) | URL del proyecto Supabase (`https://gyugkrvdgxofnkfhzbeq.supabase.co`) |
-| `VITE_SUPABASE_ANON_KEY` | Frontend (pública) | anon key pública |
+| `VITE_SUPABASE_PUBLISHABLE_KEY` | Frontend (pública) | Publishable key (`sb_publishable_...`), sustituye a la legacy `VITE_SUPABASE_ANON_KEY` |
+| `VITE_LOYALTY_ENGINE_FUNCTION_URL` | Frontend (opcional) | URL de la Edge `loyalty-engine` (default: `${VITE_SUPABASE_URL}/functions/v1/loyalty-engine`) |
 | `VITE_LOYVERSE_CUSTOMERS_FUNCTION_URL` | Frontend (opcional) | URL de la Edge `loyverse-customers` (default: `${VITE_SUPABASE_URL}/functions/v1/loyverse-customers`) |
 | `LOYVERSE_ACCESS_TOKEN` | Edge (SOLO servidor) | Token de Loyverse leer/escribir |
 | `SYNC_CRON_SECRET` | Edge (SOLO servidor) | Secreto compartido del cron (`x-sync-secret`) para `loyverse-receipts-sync` |
+| `LOYALTY_OTP_PEPPER` | Edge `loyalty-engine` (SOLO servidor) | Clave HMAC-SHA256 del OTP de canje (`claim_start`/`claim_verify`). Fail-closed: si falta, 503. Nunca `VITE_*` |
 | `SMTP_HOST/PORT/USER/PASS` | Auth y Edge `send-ticket` | SMTP custom / envío del ticket (bloques comentados en `config.toml` hasta tener proveedor/dominio) |
 | `SMTP_SENDER_EMAIL / SMTP_SENDER_NAME / SMTP_APP_URL` | Edge `send-ticket` | Remitente y CTA del correo del ticket |
 | `SMTP_ADMIN_EMAIL` | Auth | `[auth.email.smtp]` |

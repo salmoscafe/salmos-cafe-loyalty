@@ -559,10 +559,14 @@ test("ningún archivo nuevo filtra un VALOR de la service role key", () => {
   }
 });
 
-test("la Edge Function lee la service role key solo por Deno.env.get", () => {
+test("la Edge Function lee las API keys nuevas del entorno y ya no usa las legacy", () => {
   const edge = readFileSync(join(REPO_ROOT, "supabase/functions/loyalty-engine/index.ts"), "utf8");
-  const readAsEnv = edge.includes('Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")');
-  assert.equal(readAsEnv, true);
-  // Ninguna asignación dura de la key (un valor literal nunca debe existir).
-  assert.equal(/SUPABASE_SERVICE_ROLE_KEY\s*[:=]\s*["'][^"']+["']/.test(edge), false);
+  // Migración a las nuevas keys: se leen por Deno.env.get, nunca hardcodeadas.
+  assert.equal(edge.includes('Deno.env.get("SUPABASE_SECRET_KEYS")'), true);
+  assert.equal(edge.includes('Deno.env.get("SUPABASE_PUBLISHABLE_KEYS")'), true);
+  assert.equal(/SUPABASE_SECRET_KEYS\s*[:=]\s*["'][A-Za-z0-9_-]{20,}["']/.test(edge), false);
+  assert.equal(/SUPABASE_PUBLISHABLE_KEYS\s*[:=]\s*["'][A-Za-z0-9_-]{20,}["']/.test(edge), false);
+  // Ya no debe depender de las keys legacy.
+  assert.equal(edge.includes("SUPABASE_SERVICE_ROLE_KEY"), false);
+  assert.equal(edge.includes("SUPABASE_ANON_KEY"), false);
 });

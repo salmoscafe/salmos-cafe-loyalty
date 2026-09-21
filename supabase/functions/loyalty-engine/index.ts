@@ -7,6 +7,9 @@
 //   (register_visit / cancel_visit / redeem_reward) → PostgreSQL
 //   claim_start NO va a una RPC: inserta en reward_claims (0016) con
 //   service_role y devuelve el OTP en claro al customer dueño.
+//   claim_verify va a verify_reward_claim (0017): la Edge recomputa el
+//   HMAC con la pepper y la RPC hace pending → verified.
+//   redeem_reward (0017) exige una claim 'verified': sin ella no canjea.
 //
 // La función es una capa de validación y ENVOLTURA, NO la fuente de
 // verdad de las reglas de negocio. Las reglas ($50, 1 visita/día,
@@ -27,11 +30,13 @@
 //     body son rechazados. El rol se determina server-side leyendo
 //     public.profiles (id = auth.uid()); nunca user_metadata.
 //   * Las RPCs tienen grants SOLO para service_role; por eso la
-//     función usa SUPABASE_SERVICE_ROLE_KEY (lado servidor). Esa key
-//     jamás es VITE_*, jamás existe en src/ ni en el bundle.
+//     función usa la SECRET KEY nueva (SUPABASE_SECRET_KEYS) del lado
+//     servidor. Esa key jamás es VITE_*, jamás existe en src/ ni en
+//     el bundle. La validación del JWT del usuario usa la PUBLISHABLE
+//     KEY nueva (SUPABASE_PUBLISHABLE_KEYS).
 //
 // Despliegue: supabase functions deploy loyalty-engine
-// Vars: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
+// Vars: SUPABASE_URL, SUPABASE_PUBLISHABLE_KEYS, SUPABASE_SECRET_KEYS,
 //       LOYALTY_OTP_PEPPER (obligatoria para claim_start; fail-closed).
 // ---------------------------------------------------------------
 
@@ -45,11 +50,13 @@ import {
   buildRpcArgs,
   decideActorPolicy,
   decideLookupPolicy,
+  extractOtpSalt,
   generateOtpCode,
   getBusinessDate,
   getOtpExpiry,
   hashOtp,
   isFutureDate,
+  isValidOtpHashFormat,
   isValidUuid,
   mapRpcError,
   parseBearer,
@@ -72,16 +79,43 @@ function json(body, status = 200) {
   });
 }
 
+// Las nuevas API keys de Supabase llegan al runtime como un diccionario
+// JSON por nombre (`{"default":"sb_..."}`), no como string plano. Se lee
+// la key "default" sin registrar el valor en logs; si falta, está
+// corrupta o no existe "default", devuelve "" y el handler responde 503
+// (fail-closed). Nunca se hardcodea ni se expone el valor.
+function readDefaultKey(rawJson) {
+  if (!rawJson) return "";
+  try {
+    const parsed = JSON.parse(rawJson);
+    if (parsed && typeof parsed === "object" && typeof parsed["default"] === "string") {
+      return parsed["default"];
+    }
+  } catch {
+    // JSON inválido → sin key (fail-closed).
+  }
+  return "";
+}
+
 // Nombre real de la RPC según la operación (firmas de 0005).
 // `lookup` NO tiene RPC: es una LECTURA staff-only que hace la Edge
 // con service_role leyendo customers/cycles/visits/rewards (CP3.1).
 // `claim_start` NO tiene RPC: pide el OTP del CUSTOMER dueño de su
 // recompensa e inserta en reward_claims (0016) con service_role.
+// `claim_verify` va a verify_reward_claim (0017): Staff/Admin valida
+// el OTP y la RPC hace pending → verified.
 const RPC_BY_OPERATION = {
   visit: "register_visit",
   cancel: "cancel_visit",
   redeem: "redeem_reward",
+  claim_verify: "verify_reward_claim",
 };
+
+// Valor centinela con formato válido `saltHex:hexHMAC` para cuando NO hay
+// claim pending: la RPC 0017 recibe un candidato que nunca coincide y
+// responde con el motivo específico (CLAIM_NOT_FOUND / ALREADY_*).
+// El OTP real JAMÁS se registra en logs.
+const NO_PENDING_CANDIDATE = `${"0".repeat(32)}:${"0".repeat(64)}`;
 
 const LOOKUP_REWARD_SELECT =
   "id, cycle_id, status, expires_at, max_value";
@@ -262,6 +296,31 @@ async function serveClaimStart({ serviceClient, userId, rewardId, pepper, now })
   }
 }
 
+// ---------------------------------------------------------------
+// computeVerifyCandidate — candidato HMAC para claim_verify (0017).
+//   * La pepper vive SOLO aquí (env secret). La Edge recomputa el mismo
+//     HMAC-SHA256 que claim_start usando el salt embebido en otp_hash y
+//     pasa el candidato a la RPC verify_reward_claim, que compara en
+//     tiempo constante contra el hash almacenado.
+//   * Si no hay claim 'pending' (o el hash es ilegible), se envía un
+//     centinela de formato válido: la RPC responde el motivo exacto sin
+//     que aquí se decida ni se filtre información del OTP.
+// ---------------------------------------------------------------
+async function computeVerifyCandidate({ serviceClient, rewardId, otp, pepper }) {
+  const { data: claim, error } = await serviceClient
+    .from("reward_claims")
+    .select("otp_hash")
+    .eq("reward_id", rewardId)
+    .eq("status", "pending")
+    .maybeSingle();
+  if (error) throw error;
+  if (!claim || !isValidOtpHashFormat(claim.otp_hash)) {
+    return NO_PENDING_CANDIDATE;
+  }
+  const salt = extractOtpSalt(claim.otp_hash);
+  return await hashOtp({ otp, rewardId, pepper, salt });
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -271,8 +330,8 @@ Deno.serve(async (req) => {
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
-  const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
-  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+  const publishableKey = readDefaultKey(Deno.env.get("SUPABASE_PUBLISHABLE_KEYS"));
+  const secretKey = readDefaultKey(Deno.env.get("SUPABASE_SECRET_KEYS"));
 
   try {
     // ---------------------------------------------------------------
@@ -284,13 +343,13 @@ Deno.serve(async (req) => {
       return json(buildErrorResponseBody("UNAUTHORIZED", "Autenticación requerida."), 401);
     }
 
-    if (!supabaseUrl || !supabaseAnonKey) {
+    if (!supabaseUrl || !publishableKey) {
       return json(buildErrorResponseBody("SRV_NOT_CONFIGURED", "Servicio no configurado."), 503);
     }
 
-    // Cliente anon SOLO para validar el usuario (RLS del propio JWT);
-    // las mutaciones van por service_role en el paso 4.
-    const authClient = createClient(supabaseUrl, supabaseAnonKey, {
+    // Cliente publishable SOLO para validar el usuario (el JWT del
+    // propio usuario); las mutaciones van con la secret key en el paso 4.
+    const authClient = createClient(supabaseUrl, publishableKey, {
       global: { headers: { Authorization: authHeader } },
       auth: { persistSession: false, autoRefreshToken: false },
     });
@@ -331,16 +390,17 @@ Deno.serve(async (req) => {
     }
 
     // ---------------------------------------------------------------
-    // 4) Cliente service_role (grants 0005) — además de ejecutar las
-    //    RPCs, resuelve el rol desde public.profiles. Al ser la fuente
-    //    de verdad del rol, el lookup va por service_role (BYPASSRLS):
-    //    nunca se confía en el rol que el frontend envíe ni en metadatos
-    //    del JWT que el usuario podría manipular.
+    // 4) Cliente con la SECRET KEY (rol service_role, grants 0005) —
+    //    además de ejecutar las RPCs, resuelve el rol desde
+    //    public.profiles. Al ser la fuente de verdad del rol, el lookup
+    //    va con la secret key (BYPASSRLS): nunca se confía en el rol que
+    //    el frontend envíe ni en metadatos del JWT que el usuario podría
+    //    manipular.
     // ---------------------------------------------------------------
-    if (!serviceRoleKey) {
+    if (!secretKey) {
       return json(buildErrorResponseBody("SRV_NOT_CONFIGURED", "Servicio no configurado."), 503);
     }
-    const serviceClient = createClient(supabaseUrl, serviceRoleKey, {
+    const serviceClient = createClient(supabaseUrl, secretKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
@@ -387,6 +447,25 @@ Deno.serve(async (req) => {
         pepper,
         now: new Date(),
       });
+    }
+
+    // claim_verify: Staff/Admin valida el OTP de una recompensa (0017).
+    // La Edge recomputa el HMAC con la pepper y delega en la RPC
+    // verify_reward_claim la comparación en tiempo constante y la
+    // transición pending → verified. Fail-closed si falta la pepper.
+    if (operation === "claim_verify") {
+      const pepper = Deno.env.get("LOYALTY_OTP_PEPPER") || "";
+      if (!pepper) {
+        return json(buildErrorResponseBody("SRV_NOT_CONFIGURED", "Servicio no configurado."), 503);
+      }
+      payloadCheck.data.candidateHash = await computeVerifyCandidate({
+        serviceClient,
+        rewardId: payloadCheck.data.rewardId,
+        otp: payloadCheck.data.otp,
+        pepper,
+      });
+      // Continúa al camino genérico de RPC (abajo): buildRpcArgs despacha
+      // claim_verify → verify_reward_claim con el candidato ya computado.
     }
 
     // ---------------------------------------------------------------
