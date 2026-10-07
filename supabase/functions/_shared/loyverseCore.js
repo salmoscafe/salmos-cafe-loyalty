@@ -39,12 +39,19 @@ export function normalizePhone(value) {
 }
 
 // Formato E.164 para el campo phone_number de Loyverse (≤ 15 chars).
-// Si el valor ya viene con "+", se conserva el país; si no, se asume +52.
+//   * Con "+": se conserva el país tal cual (+526645550000, +16641234567).
+//   * Sin "+" y con el país ya incluido (52 + 10 dígitos nacionales,
+//     p. ej. "526645550000", que es lo que produce normalizePhone de un
+//     E.164 MX): se trata como country-coded → "+526645550000". Sin esta
+//     regla se anteponía otro 52 → "+52526645550000" (bug de doble +52).
+//   * Sin "+" y sin país (10 dígitos nacionales): se asume +52.
 export function toE164(value, defaultCountryCode = "52") {
   const digits = normalizePhone(value);
   if (!digits) return null;
   const hasPlus = String(value).trim().startsWith("+");
-  const e164 = hasPlus ? `+${digits}` : `+${defaultCountryCode}${digits}`;
+  const alreadyCountryCoded =
+    !hasPlus && digits.length === defaultCountryCode.length + 10 && digits.startsWith(defaultCountryCode);
+  const e164 = hasPlus || alreadyCountryCoded ? `+${digits}` : `+${defaultCountryCode}${digits}`;
   return e164.length <= 15 ? e164 : e164.slice(0, 15);
 }
 
@@ -103,6 +110,39 @@ export function resolveLoyverseTarget({ emailMatches, phoneMatches }) {
     };
   }
   return { status: "none", audit: { via: null } };
+}
+
+// customer_code confiable para el sync (hallazgo 2026-10-07).
+// El customer_code es el token QR del cliente y viaja a Loyverse: la
+// ÚNICA fuente válida es la fila `customers` del usuario autenticado
+// (profile.customer_code, NOT NULL en el esquema). El body solo puede
+// repetir ese mismo valor (el frontend lo envía por compatibilidad):
+//   * ausente / null / ""          → se usa el de la base.
+//   * no-string                    → 400 invalid_body.
+//   * distinto al de la base       → 409 customer_code_mismatch (no se
+//                                    llama a Loyverse; se audita).
+//   * igual (trim, sin mayúsc.)    → se usa el de la base.
+//   * sin perfil                   → null: runLoyverseSync responde
+//                                    no_profile y el body nunca se usa.
+export function resolveTrustedCustomerCode({ requestedCode, profile }) {
+  const trusted =
+    profile && typeof profile.customer_code === "string" && profile.customer_code.trim()
+      ? profile.customer_code.trim()
+      : null;
+
+  if (requestedCode === undefined || requestedCode === null || requestedCode === "") {
+    return { ok: true, customerCode: trusted };
+  }
+  if (typeof requestedCode !== "string") {
+    return { ok: false, status: 400, code: "invalid_body" };
+  }
+  if (!trusted) {
+    return { ok: true, customerCode: null };
+  }
+  if (requestedCode.trim().toUpperCase() !== trusted.toUpperCase()) {
+    return { ok: false, status: 409, code: "customer_code_mismatch" };
+  }
+  return { ok: true, customerCode: trusted };
 }
 
 export function isDuplicateCustomerCodeError(error) {
@@ -246,10 +286,13 @@ export async function createOrLinkLoyverseCustomer({
     // decide si hay que actualizar (solo rellenos) o si hay conflicto de
     // identidad (email/teléfono distintos → bloque). Nunca se sobrescriben
     // valores distintos ni se tocan datos derivados del POS.
+    // Teléfono ORIGINAL (no `normalizedPhone`): computeIdentityUpdates lo
+    // lleva a E.164 con toE164. Pasarle los dígitos ya con el 52 provocaba
+    // "+52526645550000". La búsqueda (listByPhone) sigue usando dígitos.
     const identity = computeIdentityUpdates({
       name,
       email: normalizedEmail,
-      phone: normalizedPhone,
+      phone: normalizedPhone ? phone : null,
       customerCode,
       loyverse: pickResolvedCustomer(emailMatches, phoneMatches),
     });

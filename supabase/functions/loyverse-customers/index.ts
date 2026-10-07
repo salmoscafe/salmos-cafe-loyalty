@@ -27,6 +27,7 @@
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { runLoyverseSync } from "../_shared/syncClaim.js";
+import { resolveTrustedCustomerCode } from "../_shared/loyverseCore.js";
 import { readDefaultKey } from "../_shared/supabaseKeys.js";
 
 const LOYVERSE_BASE = "https://api.loyverse.com/v1.0/customers";
@@ -213,7 +214,32 @@ Deno.serve(async (req) => {
     const name = body.name || profile?.name || user.user_metadata?.name || "";
     const email = user.email || profile?.email || null;
     const phone = body.phone || profile?.phone || user.phone || null;
-    const customerCode = body.customerCode || profile?.customer_code || null;
+
+    // customer_code: SIEMPRE el de la fila `customers` del usuario
+    // autenticado. Un valor distinto en el body se rechaza (409) sin
+    // llamar a Loyverse y queda auditado (customer_sync_events, escrito
+    // con service_role). Nota: la policy actual de esa tabla permite al
+    // cliente editar/borrar SUS eventos — hallazgo reportado aparte.
+    const codeCheck = resolveTrustedCustomerCode({ requestedCode: body.customerCode, profile });
+    if (!codeCheck.ok) {
+      if (codeCheck.code === "customer_code_mismatch") {
+        try {
+          await logSyncEvent(admin, {
+            authUserId: user.id,
+            traceId,
+            eventType: "loyverse_conflict",
+            detail: {
+              code: "customer_code_mismatch",
+              requestedCustomerCode: String(body.customerCode).slice(0, 40),
+            },
+          });
+        } catch {
+          // La auditoría nunca convierte el rechazo en éxito.
+        }
+      }
+      return json({ ok: false, code: codeCheck.code, traceId, retriable: false }, codeCheck.status);
+    }
+    const customerCode = codeCheck.customerCode;
 
     if (!name) return json({ ok: false, code: "missing_name", retriable: false }, 400);
 

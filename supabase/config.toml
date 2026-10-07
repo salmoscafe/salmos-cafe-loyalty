@@ -461,6 +461,15 @@ verify_jwt = true
 [functions.admin-employees]
 verify_jwt = true
 
+# Función auth-phone-login (login / recuperación POR TELÉFONO, 0020).
+# verify_jwt = false: se invoca ANTES de tener sesión. Resuelve
+# teléfono → email del lado servidor (secret key) y delega la validación
+# de contraseña/OTP en GoTrue con Sb-Forwarded-For; jamás devuelve el
+# email al navegador ni distingue teléfono inexistente vs contraseña
+# incorrecta.
+[functions.auth-phone-login]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327

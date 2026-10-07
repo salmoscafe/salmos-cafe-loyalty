@@ -50,6 +50,22 @@ export const AUTH_ERRORS = {
     code: "GOOGLE_CONFLICT",
     message: "Ese correo ya tiene una cuenta de Salmos. Entra con tu correo y contraseña.",
   },
+  // Login por teléfono (Edge auth-phone-login): mismo mensaje para
+  // teléfono inexistente y contraseña incorrecta (sin enumeración).
+  PHONE_INVALID_CREDENTIALS: {
+    code: "PHONE_INVALID_CREDENTIALS",
+    message: "Tu teléfono o contraseña no son correctos. Revisa e intenta de nuevo.",
+  },
+  // Solo alcanzable con la contraseña correcta; sin botón de reenvío
+  // (el reenvío necesita el correo, que el navegador ya no conoce).
+  PHONE_EMAIL_NOT_CONFIRMED: {
+    code: "PHONE_EMAIL_NOT_CONFIRMED",
+    message: "Todavía no confirmas tu correo. Revisa tu bandeja de entrada (y el spam) o entra con tu correo para reenviar la confirmación.",
+  },
+  RATE_LIMITED: {
+    code: "RATE_LIMITED",
+    message: "Demasiados intentos. Espera unos minutos e intenta de nuevo.",
+  },
   NETWORK_ERROR: {
     code: "NETWORK_ERROR",
     message: "No pudimos conectar. Revisa tu conexión e intenta de nuevo.",

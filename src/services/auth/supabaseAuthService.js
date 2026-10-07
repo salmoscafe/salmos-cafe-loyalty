@@ -9,13 +9,17 @@
 //
 // Cómo funciona cada pieza sobre Supabase:
 //   * signInWithPassword acepta email O teléfono como identificador.
-//     El teléfono se resuelve a email con la función segura
-//     resolve_email_for_login (migración 0003, SECURITY DEFINER) para
-//     NO romper RLS; la validación de la contraseña la hace SIEMPRE
-//     GoTrue, nunca esa función.
-//   * forgotPasswordStart envía un código al correo (un solo de uso)
-//     vía signInWithOtp({shouldCreateUser:false}); no hay proveedor SMS
-//     configurado, así que aún con teléfono la recuperación va al correo.
+//       - email   → supabase.auth.signInWithPassword (flujo de siempre).
+//       - teléfono → Edge `auth-phone-login`: el servidor resuelve el
+//         teléfono a la cuenta y GoTrue valida la contraseña; al
+//         navegador solo vuelven los tokens de sesión (setSession) o un
+//         error genérico. El email de la cuenta NUNCA llega al navegador
+//         (0020: resolve_email_for_login ya no es pública).
+//   * forgotPasswordStart envía un código al correo (un solo de uso):
+//       - email   → signInWithOtp({shouldCreateUser:false}) directo.
+//       - teléfono → Edge `auth-phone-login` (recover_start/verify): la
+//         respuesta es idéntica exista o no la cuenta.
+//     No hay proveedor SMS configurado: el código siempre va al correo.
 //   * verifyOtp (forgotPasswordVerify) crea una sesión efímera que
 //     setNewPassword aprovecha para actualizar la contraseña con
 //     updateUser. No quedan sesiones "tocadas por magia" después: la
@@ -32,6 +36,7 @@ import { toE164Mx } from "../../lib/phone.js";
 import { ensureLoyaltyProfile } from "../customers/customerService.js";
 import { createOrLinkLoyverseCustomer } from "../loyverse/loyverseCustomerService.js";
 import { makeError, toFriendlyError } from "./authErrors.js";
+import { callPhoneLogin } from "./phoneLoginEdgeClient.js";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MIN_PASSWORD = 8;
@@ -51,36 +56,37 @@ function maskContact(method, value) {
   return `••• •••${digits.slice(-2)}`;
 }
 
-// Resuelve "email o teléfono" → email de la cuenta.
-//   * Identificadores con "@" pasan directo a GoTrue (él decide el error).
-//   * Teléfonos se resuelven vía RPC seguro (solo devuelve email si hay
-//     UNA coincidencia exacta por dígitos). Sin coincidencia → la app
-//     pide usar el correo ("No encontramos una cuenta…").
-async function resolveLoginEmail(identifierRaw) {
-  const identifier = String(identifierRaw || "").trim();
-  if (!identifier) return { ok: false, error: makeError("INVALID_CREDENTIALS") };
-
-  if (identifier.includes("@")) {
-    return { ok: true, email: identifier.toLowerCase() };
-  }
-
-  if (!supabaseClient) return { ok: false, error: makeError("NETWORK_ERROR") };
-  try {
-    const { data, error } = await supabaseClient.rpc("resolve_email_for_login", {
-      p_identifier: phoneIdentifierForLogin(identifier),
-    });
-    if (error) return { ok: false, error: toFriendlyError(error) };
-    if (!data) return { ok: false, error: makeError("ACCOUNT_NOT_FOUND") };
-    return { ok: true, email: String(data).toLowerCase() };
-  } catch {
-    return { ok: false, error: makeError("NETWORK_ERROR") };
-  }
+function isEmailIdentifier(identifier) {
+  return String(identifier || "").includes("@");
 }
 
-// Normaliza el teléfono a E.164 (+52) ANTES de mandarlo al RPC, porque en
-// `customers` se almacena E.164 y el usuario escribe normalmente 10 dígitos.
-// Si no se puede deducir un teléfono mexicano válido se pasa el texto tal
-// cual: el RPC decide por dígitos y no lo reconoce (cuenta no encontrada).
+// Mapea la respuesta de la Edge auth-phone-login a errores amigables.
+// Teléfono inexistente y contraseña incorrecta llegan con el MISMO
+// código (invalid_credentials): la UI no puede distinguirlos.
+function phoneLoginError(code, fallback) {
+  if (code === "rate_limited") return makeError("RATE_LIMITED");
+  if (code === "network_error" || code === "service_unavailable") return makeError("NETWORK_ERROR");
+  return makeError(fallback);
+}
+
+// Instala en supabase-js la sesión emitida por GoTrue (vía la Edge).
+// A partir de aquí la app se comporta igual que con login por email:
+// onAuthStateChange(SIGNED_IN), getSession/getUser, refresh y RLS.
+async function adoptSession(tokens) {
+  if (!tokens?.access_token || !tokens?.refresh_token) return { ok: false, error: makeError("NETWORK_ERROR") };
+  const { error } = await supabaseClient.auth.setSession({
+    access_token: tokens.access_token,
+    refresh_token: tokens.refresh_token,
+  });
+  if (error) return { ok: false, error: makeError("NETWORK_ERROR") };
+  return { ok: true };
+}
+
+// Normaliza el teléfono a E.164 (+52) ANTES de mandarlo a la Edge
+// auth-phone-login, porque en `customers` se almacena E.164 y el usuario
+// escribe normalmente 10 dígitos. Si no se puede deducir un teléfono
+// mexicano válido se pasa el texto tal cual: el servidor lo normaliza
+// con la misma regla y compara por dígitos.
 export function phoneIdentifierForLogin(identifier) {
   return toE164Mx(identifier) || identifier;
 }
@@ -104,13 +110,46 @@ async function uniqueCustomerCode() {
 
 // Crea la fila real si no existe (idempotente). Nunca crea un segundo
 // perfil para el mismo auth_user_id (índice único en la BD).
+//
+// Teléfono (fuente oficial: customers.phone, formato E.164 MX):
+//   * Se fija SOLO al crear la fila. Si ya existe, se devuelve tal cual:
+//     la metadata nunca se vuelve a leer ni sobrescribe customers.phone.
+//   * Origen al crear: parámetro explícito `phone`, o el transporte del
+//     registro `user.user_metadata.phone` (signUpWithEmail lo guarda
+//     ahí porque la fila aún no existe). auth.users.phone (GoTrue) NO se
+//     usa: sin proveedor SMS no es una fuente válida.
+//   * Solo se persiste si normaliza a E.164 MX (toE164Mx); si no, null.
+//   * Conflicto de unicidad del teléfono (customers_phone_unique_key):
+//     el número ya pertenece a OTRO cliente. No se toca a ese cliente ni
+//     se toma el número: la fila se crea sin teléfono (la sesión sigue) y
+//     el perfil devuelto lleva `phoneConflict: true` para que la UI/soporte
+//     lo vean. El caso queda además detectable en la base (metadata con
+//     teléfono + customers.phone null → pre-chequeo/backfill auditado).
+export const PHONE_UNIQUE_CONSTRAINT = "customers_phone_unique_key";
+
+export function initialProfilePhone(user, phone) {
+  if (phone) return toE164Mx(phone) || null;
+  const metaPhone = user?.user_metadata?.phone;
+  return typeof metaPhone === "string" ? toE164Mx(metaPhone) || null : null;
+}
+
+function isUniqueViolation(error) {
+  return String(error?.code || "") === "23505" || String(error?.message || "").includes("duplicate");
+}
+
+function isPhoneUniqueViolation(error) {
+  const text = `${error?.message || ""} ${error?.details || ""}`;
+  return isUniqueViolation(error) && text.includes(PHONE_UNIQUE_CONSTRAINT);
+}
+
+async function readOwnCustomer(user) {
+  const { data } = await supabaseClient.from("customers").select("*").eq("auth_user_id", user.id).maybeSingle();
+  return data || null;
+}
+
 export async function ensureCustomerProfile(user, { name, email, phone }) {
   if (!supabaseClient) return null;
-  const { data: existing } = await supabaseClient
-    .from("customers")
-    .select("*")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
+  const existing = await readOwnCustomer(user);
   if (existing) return existing;
 
   const customerCode = await uniqueCustomerCode();
@@ -121,15 +160,26 @@ export async function ensureCustomerProfile(user, { name, email, phone }) {
     auth_user_id: user.id,
     name: displayName || "Cliente Salmos",
     email: email ? String(email).trim().toLowerCase() : user.email || null,
-    phone: phone ? toE164Mx(phone) || String(phone).trim() : user.phone || null,
+    phone: initialProfilePhone(user, phone),
     customer_code: customerCode,
   };
 
-  const { data, error } = await supabaseClient.from("customers").insert(insertRow).select("*").single();
+  let { data, error } = await supabaseClient.from("customers").insert(insertRow).select("*").single();
+
+  if (error && insertRow.phone && isPhoneUniqueViolation(error)) {
+    // El teléfono es de otro cliente: crear SIN teléfono (nunca tocar al otro).
+    ({ data, error } = await supabaseClient
+      .from("customers")
+      .insert({ ...insertRow, phone: null })
+      .select("*")
+      .single());
+    if (!error && data) return { ...data, phoneConflict: true };
+  }
+
   if (error) {
-    if (String(error.message || "").includes("duplicate") || String(error.code || "") === "23505") {
+    if (isUniqueViolation(error)) {
       // carrera por customer_code o auth_user_id: releer y devolver.
-      const { data: retry } = await supabaseClient.from("customers").select("*").eq("auth_user_id", user.id).maybeSingle();
+      const retry = await readOwnCustomer(user);
       if (retry) return retry;
     }
     throw error;
@@ -163,6 +213,9 @@ function toClientCustomer(profile) {
     customerCode: profile.customer_code,
     loyverseCustomerId: profile.loyverse_customer_id,
     loyverseSyncStatus: profile.loyverse_sync_status,
+    // true si el teléfono del registro ya pertenecía a otro cliente y la
+    // fila se creó sin teléfono (ver ensureCustomerProfile).
+    phoneConflict: Boolean(profile.phoneConflict),
   };
 }
 
@@ -271,16 +324,33 @@ export async function signUpWithEmail({ email, password, name, phone }) {
 export async function signInWithPassword({ identifier, password }) {
   if (!supabaseClient) return { ok: false, error: makeError("NETWORK_ERROR") };
 
-  const resolved = await resolveLoginEmail(identifier);
-  if (!resolved.ok) return resolved;
-  if (!password) return { ok: false, error: makeError("INVALID_CREDENTIALS") };
+  const cleanIdentifier = String(identifier || "").trim();
+  if (!cleanIdentifier || !password) return { ok: false, error: makeError("INVALID_CREDENTIALS") };
+
+  if (!isEmailIdentifier(cleanIdentifier)) {
+    return signInWithPhonePassword(cleanIdentifier, password);
+  }
 
   const { error } = await supabaseClient.auth.signInWithPassword({
-    email: resolved.email,
+    email: cleanIdentifier.toLowerCase(),
     password,
   });
   if (error) return { ok: false, error: toFriendlyError(error, "INVALID_CREDENTIALS") };
   return { ok: true };
+}
+
+// Teléfono + contraseña → Edge auth-phone-login → sesión GoTrue.
+async function signInWithPhonePassword(phoneIdentifier, password) {
+  const res = await callPhoneLogin({
+    operation: "password",
+    phone: phoneIdentifierForLogin(phoneIdentifier),
+    password,
+  });
+  if (!res.ok) {
+    if (res.code === "email_not_confirmed") return { ok: false, error: makeError("PHONE_EMAIL_NOT_CONFIRMED") };
+    return { ok: false, error: phoneLoginError(res.code, "PHONE_INVALID_CREDENTIALS") };
+  }
+  return adoptSession(res.session);
 }
 
 export async function checkSecondaryContact({ method, value }) {
@@ -288,9 +358,10 @@ export async function checkSecondaryContact({ method, value }) {
   if (!supabaseClient) return { ok: true };
 
   // RLS impide al anon leer `customers` antes del registro (siempre daría
-  // ok:true). Se comprueba en el servidor con funciones que NO abren RLS:
-  //  * phone_is_registered → sólo EXISTENCIA (booleano), sin email ni filas.
-  //  * resolve_email_for_login → email sólo si hay UNA cuenta con ese valor.
+  // ok:true). Se comprueba en el servidor con funciones que NO abren RLS
+  // y devuelven SOLO existencia (booleano), nunca email ni filas:
+  //  * phone_is_registered (0003)
+  //  * email_is_registered (0020; antes resolve_email_for_login).
   if (method === "phone") {
     const normalized = toE164Mx(value) || String(value).trim();
     try {
@@ -308,11 +379,11 @@ export async function checkSecondaryContact({ method, value }) {
 
   const email = String(value).trim().toLowerCase();
   try {
-    const { data, error } = await supabaseClient.rpc("resolve_email_for_login", {
-      p_identifier: email,
+    const { data, error } = await supabaseClient.rpc("email_is_registered", {
+      p_email: email,
     });
     if (error) return { ok: false, error: toFriendlyError(error) };
-    return data && String(data).toLowerCase() === email
+    return data === true
       ? { ok: false, error: makeError("EMAIL_ALREADY_EXISTS") }
       : { ok: true };
   } catch {
@@ -337,21 +408,41 @@ export async function resendConfirmationEmail({ email }) {
 export async function forgotPasswordStart({ identifier }) {
   if (!supabaseClient) return { ok: false, error: makeError("NETWORK_ERROR") };
 
-  const resolved = await resolveLoginEmail(identifier);
-  if (!resolved.ok) return resolved;
+  const cleanIdentifier = String(identifier || "").trim();
+  if (!cleanIdentifier) return { ok: false, error: makeError("INVALID_CREDENTIALS") };
 
+  if (!isEmailIdentifier(cleanIdentifier)) {
+    // Teléfono: la Edge responde IGUAL exista o no la cuenta, así que la
+    // UI muestra un texto genérico ("tu correo registrado") en lugar del
+    // email enmascarado, que delataba existencia y parte del correo.
+    const phone = phoneIdentifierForLogin(cleanIdentifier);
+    const res = await callPhoneLogin({ operation: "recover_start", phone });
+    if (!res.ok) return { ok: false, error: phoneLoginError(res.code, "NETWORK_ERROR") };
+    pending = { via: "phone", phone, identifier: cleanIdentifier };
+    return { ok: true, maskedContact: "registrado" };
+  }
+
+  const email = cleanIdentifier.toLowerCase();
   const { error } = await supabaseClient.auth.signInWithOtp({
-    email: resolved.email,
+    email,
     options: { shouldCreateUser: false },
   });
   if (error) return { ok: false, error: toFriendlyError(error, "NETWORK_ERROR") };
 
-  pending = { email: resolved.email, identifier };
-  return { ok: true, maskedContact: maskContact("email", resolved.email) };
+  pending = { via: "email", email, identifier: cleanIdentifier };
+  return { ok: true, maskedContact: maskContact("email", email) };
 }
 
 export async function forgotPasswordVerify({ code }) {
   if (!pending) return { ok: false, error: makeError("OTP_INVALID") };
+
+  if (pending.via === "phone") {
+    const res = await callPhoneLogin({ operation: "recover_verify", phone: pending.phone, code: String(code) });
+    if (!res.ok) return { ok: false, error: phoneLoginError(res.code, "OTP_INVALID") };
+    // Sesión efímera (igual que verifyOtp) que setNewPassword aprovechará.
+    return adoptSession(res.session);
+  }
+
   const { error } = await supabaseClient.auth.verifyOtp({
     type: "email",
     email: pending.email,

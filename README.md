@@ -36,10 +36,15 @@ complete"** (ver secciones N y O).
   `cancel_visit` / `redeem_reward`).
 - **Sync de receipts Loyverse**: real (Edge `loyverse-receipts-sync`,
   invocada cada 5 min por GitHub Actions con `x-sync-secret`).
-- **Auth Staff/Admin**: mock (PIN). **Auth Cliente**: Supabase Auth real.
-- **Migraciones `0001`–`0012`** presentes localmente. El estado **remoto**
-  del proyecto Supabase quedó **pendiente de revalidación** en esta auditoría
-  (ver sección G); se documenta sin afirmar verificaciones no reproducidas.
+- **Auth Cliente**: Supabase Auth real; el login por teléfono pasa por la
+  Edge `auth-phone-login` (el email nunca llega al navegador).
+  **Auth Staff/Admin**: Supabase Auth + rol en `public.profiles` (`0013`);
+  el PIN solo existe en modo demo (sin `.env`).
+- **Migraciones `0001`–`0023`** presentes localmente; `supabase migration
+  list` reportó local = remoto hasta `0023` (verificación del equipo,
+  2026-10-07). Ver sección G.
+- **Security Hardening `0018`–`0023`: aplicado.** Resumen abajo; detalle en
+  [`docs/security-hardening.md`](docs/security-hardening.md).
 - QA 2026-09-15 (histórico): 297 receipts procesados, 4 visitas
   reconstruidas para el cliente de prueba (order `4 → 3 → 2 → 1` en
   Actividad).
@@ -54,14 +59,32 @@ complete"** (ver secciones N y O).
 | Escrituras Staff desde la app (venta manual, canjear, cancelar) | Mock — pendiente migrar a las RPCs |
 | Sync de clientes Loyverse (crear/vincular/actualizar) | Real (Edge Function, service_role) |
 | Sync de receipts Loyverse | Real (Edge Function, cron externo) |
-| Auth Cliente (email/teléfono + contraseña, OTP recuperación, Google) | Real con `.env`; demo mock sin `.env` |
-| Auth Staff/Admin | Mock (PIN) |
+| Auth Cliente (email/teléfono + contraseña, OTP recuperación, Google) | Real con `.env` (teléfono vía Edge `auth-phone-login`); demo mock sin `.env` |
+| Auth Staff/Admin | Real con `.env` (Supabase Auth + `public.profiles`); PIN solo en demo |
 | QR | Visual — `customer_code` sirve hoy de token; firmado pendiente |
 | Email templates de Auth (branded) | Real en `email-templates/`; envío `welcome.html` sin disparador |
 | SMTP (Auth y send-ticket) | Config definida; entrega real pendiente (SMTP en el entorno de la Edge) |
 | Admin Dashboard y Clientes | Reales contra el mock |
 | Admin Ventas/Recompensas/Staff/Config | Stubs navegables |
 | Loyverse en ventas (UI) | No conectado — `ManualSalesAdapter` es la única fuente |
+
+### Security Hardening (resumen)
+
+| Pieza | Estado |
+|---|---|
+| `0018` — RPCs internas solo `service_role` + actor validado contra `profiles` | ✅ Aplicada |
+| `0019` — `bible_verse_pool` sin acceso para anon/authenticated (49 pasajes intactos) | ✅ Aplicada |
+| `0020` — `resolve_email_for_login` solo `service_role`; `email_is_registered` | ✅ Aplicada |
+| `0021`–`0023` — teléfono canónico E.164 MX, `phone_is_registered`, cliente sin UPDATE de `customers.phone` | ✅ Aplicadas |
+| Edge `auth-phone-login` (login/recuperación por teléfono sin exponer email) | ✅ Desplegada |
+| `loyverse-customers`: `customerCode` confiable (409) + fix E.164 `+52` | ✅ Desplegada |
+| Validación de `body.phone`/`body.name` en `loyverse-customers` | ⏳ Pendiente |
+| `0024` backfill de teléfonos de registro · `0025` unicidad canónica | ⏳ Pendiente |
+| `customer_sync_events` solo `service_role` · CAPTCHA (hoy Disabled) | ⏳ Pendiente |
+
+Fuente de verdad del teléfono: **`customers.phone`** (canónico
+`+52XXXXXXXXXX`). Detalle, contratos y pendientes:
+[`docs/security-hardening.md`](docs/security-hardening.md).
 
 ## C. Arquitectura
 
@@ -224,7 +247,18 @@ Todas las migraciones viven en `supabase/migrations/`. Se aplican con
 | `0009_reward_redemptions.sql` | `reward_redemptions` (evidencia de redenciones detectadas en receipts) |
 | `0010_loyverse_receipt_details.sql` | `loyalty_visits.items` (jsonb) + `receipt_date` (fecha REAL del cobro); RPC `register_visit_with_receipt` (valida con `register_visit` y persiste el detalle) |
 | `0011_visit_verse_id.sql` | `loyalty_visits.verse_id` + `bible_verse_pool` (49 pasajes); asignación conservada ante re-sync |
-| `0012_required_visits_7.sql` | **Regla vigente**: default `required_visits = 7`; actualiza **solo** ciclos activos con `required_visits = 8` a `7`. No toca completados ni activos con otro valor. Idempotente/no destructiva. (Nueva, **sin commitear** en esta auditoría) |
+| `0012_required_visits_7.sql` | **Regla vigente**: default `required_visits = 7`; actualiza **solo** ciclos activos con `required_visits = 8` a `7`. No toca completados ni activos con otro valor. Idempotente/no destructiva |
+| `0013_profiles_roles.sql` | `public.profiles`: rol (`customer`/`staff`/`admin`) y `active` por cuenta de Supabase Auth |
+| `0014_customers_exclude_loyalty.sql` | `customers.exclude_loyalty`: excluye clientes (p. ej. staff) del loyalty sync |
+| `0015_register_visit_with_receipt_exclude_loyalty.sql` | Segunda barrera `excluded_customer` en `register_visit_with_receipt` |
+| `0016_reward_claims.sql` | `reward_claims` (solicitudes de canje) |
+| `0017_reward_claim_otp.sql` | Canje con OTP verificado por Staff; `redeem_reward` exige claim `verified` |
+| `0018_rpc_authorization_hardening.sql` | **Security:** RPCs internas solo `service_role`; `assert_loyalty_actor` valida staff/admin activos en `profiles` |
+| `0019_bible_verse_pool_lockdown.sql` | **Security:** RLS en `bible_verse_pool`; anon/authenticated sin acceso; `service_role` solo SELECT |
+| `0020_login_alias_lockdown.sql` | **Security:** `resolve_email_for_login` solo `service_role`; nueva `email_is_registered` |
+| `0021_customers_phone_canonical.sql` | **Security:** normaliza `customers.phone` legacy a E.164 MX solo en casos seguros; auditoría sin teléfono completo |
+| `0022_phone_is_registered_pending.sql` | **Security:** `phone_is_registered` canónico + metadata del registro pendiente; helper privado `canonical_mx_phone` |
+| `0023_revoke_customer_phone_update.sql` | **Security:** anon sin UPDATE; authenticated solo UPDATE de `name`, `email`, `profile` |
 
 ### Regla sobre migraciones (documental, vigente)
 
@@ -234,7 +268,7 @@ Todas las migraciones viven en `supabase/migrations/`. Se aplican con
 ```
 0005 → regla histórica: 8 visitas   (no se edita)
 0012 → regla actual:   7 visitas
-0013 → (futuro, si cambia) → 8 visitas  (ejemplo de principio, no existe)
+00NN → (futuro, si cambia) → 8 visitas  (ejemplo de principio, no existe)
 ```
 
 ### Estado remoto del proyecto Supabase
@@ -242,12 +276,10 @@ Todas las migraciones viven en `supabase/migrations/`. Se aplican con
 - Proyecto remoto: ref `gyugkrvdgxofnkfhzbeq`. Proyecto local
   (`supabase/config.toml`): `project_id = "App_Salmos_LC"`, API `:54321`,
   `max_rows = 1000`, PostgreSQL 17, Edge runtime Deno 2.
-- **Pendiente de revalidación**: en esta auditoría **no se re-ejecutó**
-  `supabase db push` ni `supabase migration list` contra el remoto (requiere
-  `SUPABASE_DB_PASSWORD`, no disponible). Se **documenta sin afirmar**
-  verificaciones no reproducidas en esta sesión. El checkpoint documental
-  previo (`docs/CURRENT_STATUS.md`) registró local = remoto hasta `0012`;
-  considerar ese estado **histórico** hasta revalidarlo.
+- **Sincronizado hasta `0023`** (2026-10-07): `supabase migration list`,
+  ejecutado por el equipo, mostró local = remoto hasta
+  `0023_revoke_customer_phone_update`. Siguiente migración prevista: `0024`
+  (pendiente; ver `docs/security-hardening.md`).
 
 ## H. Autenticación
 
@@ -256,10 +288,12 @@ Todas las migraciones viven en `supabase/migrations/`. Se aplican con
 - **Registro**: email + contraseña (el email es la identidad; el teléfono es
   contacto + alias de login). Con `email confirmations = on` la cuenta queda
   pendiente hasta confirmar desde el correo (plantilla `confirm-signup.html`).
-- **Login por email o teléfono + contraseña**: el teléfono se resuelve al
-  email con `resolve_email_for_login` (migración `0003`, `SECURITY DEFINER`,
-  devuelve el email solo si hay UNA coincidencia). La validación de
-  contraseña la hace siempre GoTrue.
+- **Login por email o teléfono + contraseña**: con email, directo contra
+  GoTrue. Con teléfono, el frontend llama a la Edge **`auth-phone-login`**,
+  que resuelve el email del lado servidor (`resolve_email_for_login`, solo
+  `service_role` desde `0020`), valida con GoTrue y devuelve **solo tokens de
+  sesión** (`setSession`); errores genéricos, sin revelar si el teléfono
+  existe. La recuperación por teléfono usa la misma Edge.
 - **Recuperación de contraseña por OTP**: `signInWithOtp` + código de 6
   dígitos por correo (plantilla `otp.html`, `{{ .Token }}`, sin link). Sin
   proveedor SMS configurado, el código va al correo incluso si se pide con
@@ -270,11 +304,13 @@ Todas las migraciones viven en `supabase/migrations/`. Se aplican con
 - Los errores se traducen a mensajes amigables en español
   (`src/services/auth/authErrors.js`).
 
-### Staff y Admin (mock)
+### Staff y Admin
 
-- Staff: PIN `1234` (Ana Beltrán), `5678` (Marco Reyes), `2468` (Luisa
-  Padilla). Admin: PIN `9999` (Diana Salazar); el modo Admin no pide login
-  todavía (Fase 2). Su auth real es un paso posterior.
+- **Con Supabase configurado**: email + contraseña en Supabase Auth; el rol
+  se lee de `public.profiles` (`role` + `active`, migración `0013`), nunca de
+  `user_metadata`. Los empleados se gestionan con la Edge `admin-employees`.
+- **Modo demo (sin `.env`)**: PIN mock — Staff `1234` (Ana Beltrán), `5678`
+  (Marco Reyes), `2468` (Luisa Padilla); Admin `9999` (Diana Salazar).
 
 ## I. Integración Loyverse
 
@@ -282,10 +318,12 @@ Todas las migraciones viven en `supabase/migrations/`. Se aplican con
 
 | Función | `verify_jwt` | Rol | Protección |
 |---|---|---|---|
-| `loyverse-customers` | `true` | Sync/creación/vínculo de clientes | JWT del usuario (RLS) + `service_role` para columnas internas |
+| `loyverse-customers` | `true` | Sync/creación/vínculo de clientes | JWT del usuario (RLS) + `service_role` para columnas internas; `customerCode` siempre de la BD (mismatch → `409`) |
 | `loyverse-receipts-sync` | `false` | Sync de receipts (scheduled) | Header `x-sync-secret` == `SYNC_CRON_SECRET`; claim atómico en `loyverse_sync_state`; service_role |
 | `send-ticket` | `true` | Enviar el ticket por correo | JWT del usuario; verificación de propiedad del ticket; correo destino SIEMPRE de GoTrue/customers |
-| `loyalty-engine` | `true` | Escrituras de lealtad (ver Roadmap) | JWT + validación de actor en el core |
+| `loyalty-engine` | `true` | Escrituras de lealtad (ver Roadmap) | JWT + validación de actor en el core; `0018` revalida el actor en la BD |
+| `auth-phone-login` | `false` | Login y recuperación por teléfono | Pública; nunca devuelve email/password/OTP; respuestas genéricas; límites de Supabase Auth por IP |
+| `admin-employees` | `true` | Alta/listado/actualización de empleados | JWT + rol `admin` activo leído de `public.profiles` |
 
 ### `_shared/` (lógica pura, unit-testable con `node --test`)
 
@@ -328,20 +366,23 @@ Todas las migraciones viven en `supabase/migrations/`. Se aplican con
 
 ## J. Tests y validación
 
-- **`npm test` → 246/246 pasando · 0 fallos** (`node --test
-  "tests/*.test.mjs"`, 14 suites):
-  `auth`, `code128`, `loyalty-engine`, `loyalty`, `loyverse-sync`,
-  `navigation`, `psalms`, `receipts-sync-core`, `send-ticket-email`,
-  `single-flight`, `smtp-conn`, `sync-claim`, `verse-assignment`,
-  `visit-ordering`.
+- **`npm test` → 528/528 pasando en 32 archivos de test** · 0 fallos
+  (`node --test`, 2026-10-07).
+- **Tests de seguridad (96)** sobre PostgreSQL 17 real embebido
+  (`@electric-sql/pglite`, devDependency) con el harness
+  `tests/helpers/supabaseSqlHarness.mjs` (roles anon/authenticated/
+  service_role y default privileges de Supabase): `rpc-authorization`,
+  `bible-verse-pool-security`, `login-alias-security`,
+  `auth-phone-login-core`, `auth-phone-login-client`,
+  `loyverse-customer-code`, `loyverse-phone-e164`,
+  `phone-identity-migrations`, `customer-profile-phone`.
 - Cobertura de loyalty (documentada también en `docs/CURRENT_STATUS.md`):
   6 visitas → sin recompensa · 7 visitas → recompensa · 8.ª visita →
   pertenece al siguiente ciclo y no genera una segunda recompensa · ciclo
   nuevo → `requiredVisits = 7` · cancelación de la 7.ª visita · recompensa
   redimida · expiración.
-- **`npm run build` → OK** (3.09s). Único aviso: **preexistente** de chunk
+- **`npm run build` → OK**. Único aviso: **preexistente** de chunk
   Vite > 500 kB (`index-*.js` ~595 kB, gzip ~197 kB); sin errores.
-- **`npm audit` → 0 vulnerabilidades.**
 - QA real (histórico, 2026-09-15): 297 receipts procesados, 4 visitas
   reconstruidas (`1-0759→v1`, `1-0784→v2`, `1-0980→v3`, `1-0997→v4`), con
   `receipt_date` real y `verse_id` persistido; Activity `4 → 3 → 2 → 1`.
@@ -424,14 +465,14 @@ src/
   components/activity/        TicketVerse, ReceiptPrinter, Code128Barcode
   lib/                        supabase/client.js, utils/env.js, phone.js, psalms.js,
                               ticketVerse.js, saleOrdering.js, code128.js, receiptPdf.js
-tests/                        14 suites node --test (*.test.mjs)
+tests/                        32 archivos node --test (*.test.mjs) + helpers/ (harness SQL)
 email-templates/              fuente única de los 5 emails branded (confirm-signup,
                               reset-password, otp, change-email, welcome) + assets/
 scripts/                      build-templates-payload.py, patch-email-templates.ps1
 supabase/
   config.toml                 proyecto local, auth, templates, verify_jwt de funciones
-  migrations/                 0001-0012 (G)
-  functions/                  4 Edge Functions + _shared/ (I)
+  migrations/                 0001-0023 (G)
+  functions/                  6 Edge Functions + _shared/ (I)
 ```
 
 ## N. Qué está terminado
@@ -459,7 +500,11 @@ supabase/
   despliegue verificados.
 - ✅ Dataset local de Salmos (150 pasajes RVR1960), `psalms.js`,
   `TicketVerse`.
-- ✅ 246/246 tests pasando; build OK; `npm audit` 0 vulnerabilidades.
+- ✅ Auth real de Staff/Admin (`profiles`, `0013`) y gestión de empleados
+  (`admin-employees`).
+- ✅ Security Hardening `0018`–`0023` aplicado + Edges `auth-phone-login` y
+  `loyverse-customers` desplegadas (ver `docs/security-hardening.md`).
+- ✅ 528/528 tests pasando en 32 archivos de test; build OK.
 
 ## O. Qué está pendiente
 
@@ -486,11 +531,18 @@ supabase/
 - ⏳ SMTP real de `send-ticket` en el entorno de la Edge (hoy responde
   `email_not_configured` si no hay credenciales).
 - ⏳ Credenciales reales de Google OAuth (bloque comentado en `config.toml`).
-- ⏳ Auth real de Staff/Admin (hoy PIN mock).
+- ⏳ **Security (siguiente fase)** — detalle en
+  `docs/security-hardening.md` § Pending:
+  - `0024`: backfill controlado `raw_user_meta_data.phone → customers.phone`
+    (auditar antes los registros actuales; solo casos `ok`).
+  - `0025`: unicidad sobre el teléfono canónico (después del backfill).
+  - Validar `body.phone`/`body.name` en `loyverse-customers` (hoy el body
+    todavía tiene prioridad).
+  - `customer_sync_events`: evaluar escritura/lectura solo `service_role`.
+  - CAPTCHA / Bot Protection en Supabase Auth (hoy Disabled).
+- ⏳ Publicar el frontend (hosting + variables `VITE_*` + URL Configuration
+  de Auth).
 - ⏳ Conectar ventas Loyverse a la UI (hoy `ManualSalesAdapter`).
-- ⏳ **Revalidar el estado remoto** del proyecto Supabase (`supabase db push`
-  / `migration list`) con `SUPABASE_DB_PASSWORD` (pendiente de esta
-  auditoría).
 - ⏳ Commit de las **mejoras UI/copy** de Activity/Home/Rewards (checkpoint
   2026-09-16 en `docs/CURRENT_STATUS.md`; cambios sin stage).
 
@@ -557,6 +609,9 @@ supabase/
 
 ## Documentation
 
+- [`docs/security-hardening.md`](docs/security-hardening.md) — **Security
+  Hardening `0018`–`0023`**: estado, contratos, fuente de verdad del teléfono
+  y pendientes de seguridad.
 - `docs/CURRENT_STATUS.md` — estado verificable del proyecto y checkpoint de la
   regla de 7 visitas.
 - `docs/AUTH_AND_LOYVERSE_FLOW.md` — flujo de auth y sincronización con Loyverse.
