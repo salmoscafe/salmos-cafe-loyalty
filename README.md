@@ -936,6 +936,225 @@ Verificación local: `npm test` → 577/577 en 35 archivos (baseline previo:
   `audit_logs`, `loyverse-receipts-sync`, `loyalty-engine` ni las demás Edge
   Functions.
 
+## R. Auditoría Fase 2B — `audit_logs`
+
+- **Fecha:** 2026-10-08 · **Referencia:** `main` @ `0b20398` (migraciones
+  `0001`–`0026`).
+- **Estado:** auditoría completada — **sin cambios funcionales**. Solo se
+  actualizó este README.
+- **Método:** inspección estática del repo, historial git (pasivo) y modelo
+  local (harness `tests/helpers/supabaseSqlHarness.mjs`, PGlite en memoria
+  con `0001`–`0026` y pruebas con rollback). **Verificación remota: no
+  realizada** (esta sesión no tiene acceso al proyecto); queda una consulta
+  de solo lectura en "Pendientes".
+
+### Alcance
+
+Migraciones `0002` (definición), `0005`, `0007`, `0015`, `0017`, `0018`,
+`0021`, `0024`; Edge Functions `loyalty-engine`, `loyverse-receipts-sync`
+(y revisión de las 6); `_shared/loyaltyEngineCore.js`,
+`_shared/receiptsSyncCore.js`; frontend `src/data/mockDatabase.js`,
+`src/services/{auth,loyalty,sales,staff}` y
+`src/screens/staff/StaffActivity.jsx`; tests.
+
+### Estructura (`0002`)
+
+| Columna | Tipo / constraint | Quién la fija |
+|---|---|---|
+| `id` | `uuid` PK, default `gen_random_uuid()` | PostgreSQL |
+| `actor_id` | `text not null` | RPC (parámetro `p_actor_id`, validado; ver "Proveniencia") |
+| `actor_role` | `text not null`, `CHECK` en `customer`/`staff`/`admin`/`system` | RPC (`p_actor_role`, validado) |
+| `customer_id`, `cycle_id`, `visit_id`, `reward_id` | `uuid` null, FK `on delete set null` | RPC (filas leídas dentro de la transacción) |
+| `sale_id` | `text` null | RPC |
+| `action` | `text not null` (sin `CHECK`) | Literal fijo en cada RPC |
+| `detail` | `jsonb` null | RPC (`jsonb_build_object` con datos de la operación) |
+| `created_at` | `timestamptz not null default now()` | PostgreSQL (ningún `INSERT` lo envía) |
+
+Sin columnas de IP, user-agent ni trace ID. Índices: PK,
+`(customer_id, created_at desc)` y `(cycle_id, created_at desc)`. Sin
+triggers ni vistas dependientes.
+
+### Writers encontrados
+
+| Ubicación | Operación | Actor | Fuente del actor | Datos | ¿Puede alterar auditoría? | Tipo |
+|---|---|---|---|---|---|---|
+| `register_visit` (`0007`; vía `register_visit_with_receipt`, `0015`) | `INSERT` `VISIT_ADDED` / `REWARD_EARNED` | staff/admin o `system` | `p_actor_id`/`p_actor_role` validados por `assert_loyalty_actor` | visita, monto, ciclo, recompensa | No (solo `INSERT`) | Legítimo |
+| `cancel_visit` (`0007`; vía `cancel_visit_by_sale`) | `INSERT` `VISIT_REVERTED` / `REWARD_CANCELLED` | ídem | ídem | visita, recompensa revertida | No | Legítimo |
+| `verify_reward_claim` (`0017`) | `INSERT` `CLAIM_VERIFIED` | staff/admin | ídem | claim, recompensa | No | Legítimo |
+| `redeem_reward` (`0017`) | `INSERT` `REWARD_REDEEMED` | staff/admin | ídem | recompensa, `redeemed_by` | No | Legítimo |
+| `0021`, `0024` (migraciones) | `INSERT` `phone_normalize_*` / backfill | `system` | literal en la migración (`postgres`) | resultado sin teléfono completo | No | Legítimo (una vez) |
+| `loyalty-engine` (Edge) | `rpc()` con `service_role` a las RPCs anteriores | staff/admin | `auth.getUser(token)` → `public.profiles` (rol y `active`) | — | No | Indirecto (legítimo) |
+| `loyverse-receipts-sync` (Edge) | `rpc()` con `service_role` | `system` | constante `SYNC_ACTOR` (`loyverse-receipts-sync`) | — | No | Indirecto (legítimo) |
+| `logAudit` (`src/data/mockDatabase.js`) | `push` a un arreglo en memoria | lo que pase el llamador | modo demo | — | No toca Supabase | Mock / dev bridge |
+| `loyalty-engine` `lookup` | — | — | — | — | Comentario "no escribe audit_logs" | Falso positivo |
+
+Ningún código hace `UPDATE` ni `DELETE` sobre `audit_logs` (ni RPC, ni Edge,
+ni frontend, ni scripts). El frontend no escribe la tabla real.
+
+### Lectores encontrados
+
+| Ubicación | Qué lee | ¿Decisión de negocio? |
+|---|---|---|
+| `tests/phone-identity-migrations.test.mjs` | Filas de `0021` (como `postgres`, en PGlite) | No (test) |
+| `staffService.getRecentActivityForStaff` → `StaffActivity.jsx` | Arreglo **mock** en memoria, no la tabla | No |
+
+Ninguna RPC, Edge Function ni pantalla lee `public.audit_logs`. **La
+integridad de `audit_logs` es principalmente forense/operacional.**
+
+### Proveniencia del actor
+
+- El actor nunca viene del cliente. `loyalty-engine` rechaza `actorId` /
+  `actorRole` en el payload y lo deriva de la sesión (`auth.getUser`) +
+  `public.profiles` (rol y `active`, leídos con `service_role`).
+  `loyverse-receipts-sync` usa un actor fijo `system`.
+- `assert_loyalty_actor` (`0018`), llamada por todas las RPCs escritoras,
+  exige `auth.role() = 'service_role'` **sin** sesión de usuario; para
+  `staff`/`admin` comprueba que `p_actor_id` sea un perfil activo con ese rol
+  exacto; acepta `system`; rechaza `customer`.
+- Con `0018`, `anon` y `authenticated` no tienen `EXECUTE` sobre ninguna de
+  esas RPCs. No hay suplantación de actor posible desde un cliente.
+- **Historial:** antes de `0018` las RPCs eran ejecutables por
+  `anon`/`authenticated` (default privileges) y `assert_loyalty_actor`
+  aceptaba `actor_role = 'customer'` con el propio `customers.id`; un cliente
+  podía registrarse visitas (y su `VISIT_ADDED`). Corregido en `0018`
+  (`9cf06ea`).
+
+### Timestamps
+
+`created_at` lo genera PostgreSQL (`default now()`); ninguna RPC lo envía y
+ningún cliente puede insertar. Nadie puede fijar fechas futuras o anteriores
+a la creación del usuario desde la API, ni reescribir eventos históricos
+(sin `UPDATE`/`DELETE` en código y bloqueado por RLS para clientes).
+
+### RLS y privilegios (modelo local)
+
+| Rol | Privilegios de tabla | Efecto real |
+|---|---|---|
+| `anon` | `SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER` (default privileges) | RLS sin policies: 0 filas en SELECT/UPDATE/DELETE, INSERT rechazado. `TRUNCATE` (no cubierto por RLS) funciona en SQL, pero PostgREST no lo expone y ninguna RPC ejecuta SQL dinámico |
+| `authenticated` | Igual que `anon` | Igual que `anon` |
+| `service_role` | Todos (BYPASSRLS) | Writer legítimo vía RPCs |
+| `postgres` | Owner | Migraciones |
+
+RLS activada, no forzada; **ninguna policy** (decisión de `0002`: "solo
+service_role"). Sin privilegios por columna.
+
+### Edge Functions
+
+| Función | JWT | Autentica | Cliente que escribe | Actor | ¿Actor del body? | Hallazgo |
+|---|---|---|---|---|---|---|
+| `loyalty-engine` | `verify_jwt = true` + `auth.getUser` | Usuario + rol en `profiles` | `service_role` (RPC) | sesión + `profiles` | No (rechazado) | Ninguno |
+| `loyverse-receipts-sync` | `false` | `x-sync-secret` == `SYNC_CRON_SECRET` | `service_role` (RPC) | `system` fijo | No | Ninguno en auditoría (comparación del secreto con `!==`, no de tiempo constante; teórico) |
+| `loyverse-customers`, `send-ticket`, `auth-phone-login`, `admin-employees` | — | — | — | — | — | No tocan `audit_logs` |
+
+### RPC
+
+| Función | Tipo | Escribe `audit_logs` | `EXECUTE` | Valida autorización |
+|---|---|---|---|---|
+| `register_visit` | SECURITY DEFINER | INSERT | solo `service_role` | `assert_loyalty_actor` |
+| `register_visit_with_receipt` | SECURITY DEFINER | vía `register_visit` | solo `service_role` | vía `register_visit` |
+| `cancel_visit` | SECURITY DEFINER | INSERT | solo `service_role` | `assert_loyalty_actor` |
+| `cancel_visit_by_sale` | SECURITY DEFINER | vía `cancel_visit` | solo `service_role` | `assert_loyalty_actor` + `cancel_visit` |
+| `verify_reward_claim` | SECURITY DEFINER | INSERT | solo `service_role` | `assert_loyalty_actor` |
+| `redeem_reward` | SECURITY DEFINER | INSERT | solo `service_role` | `assert_loyalty_actor` |
+
+Las únicas funciones SECURITY DEFINER ejecutables por `anon`/`authenticated`
+son `phone_is_registered` y `email_is_registered`, que no tocan
+`audit_logs`. Ninguna función hace `UPDATE`/`DELETE` de la tabla.
+
+### Pruebas locales (PGlite, con rollback)
+
+| Prueba | Esperado | Obtenido |
+|---|---|---|
+| P1 — authenticated inserta su propio evento | Rechazo | `42501` RLS |
+| P2 — authenticated inserta evento de otro usuario | Rechazo | `42501` RLS |
+| P3 — authenticated modifica su evento | Sin efecto | 0 filas |
+| P4 — authenticated modifica evento de backend (`system`) | Sin efecto | 0 filas |
+| P5 — authenticated borra su evento | Sin efecto | 0 filas |
+| P6 — authenticated borra evento de backend | Sin efecto | 0 filas |
+| P7 — authenticated inserta con fecha futura | Rechazo | `42501` RLS |
+| P8 — authenticated fabrica acción `admin` | Rechazo | `42501` RLS |
+| P9 — `anon`: SELECT / INSERT / UPDATE / DELETE | Sin acceso | 0 filas / `42501` / 0 / 0 |
+| P9 — `anon`/authenticated: `TRUNCATE` en SQL | — | Permitido en SQL (no expuesto por API) |
+| Extra — authenticated/anon llaman `register_visit` | Rechazo | `42501` permission denied |
+| Extra — `service_role` con actor `admin` sin perfil | Rechazo | `42501` "No autorizado." |
+
+El conteo final de la tabla no cambió.
+
+### Comparación con `customer_sync_events`
+
+| Característica | `customer_sync_events` (tras `0026`) | `audit_logs` |
+|---|---|---|
+| Usuario puede INSERT | No | No |
+| Usuario puede UPDATE | No | No (0 filas) |
+| Usuario puede DELETE | No | No (0 filas) |
+| Usuario puede SELECT | Sí, solo lo suyo | No |
+| Backend puede INSERT | Sí (`service_role`) | Sí (RPCs con `service_role`) |
+| Actor determinado por JWT | Sí (`user.id` verificado) | Sí (sesión + `profiles`) o `system` fijo |
+| Actor proporcionado por cliente | No | No |
+| Timestamp controlado por DB | Sí | Sí |
+| Eventos usados para decisiones | No | No |
+| Riesgo de manipulación por clientes | Ninguno tras `0026` | Ninguno |
+
+`audit_logs` ya tiene, desde `0002`/`0018`, un aislamiento igual o más
+estricto que el que `0026` dio a `customer_sync_events`. **No necesita un
+hardening equivalente**; solo queda la limpieza de grants de defensa en
+profundidad.
+
+### Hallazgos
+
+- 🔴 **Crítico:** ninguno.
+- 🟠 **Alto:** ninguno.
+- 🟡 **Medio:** ninguno.
+- 🔵 **Bajo — grants de tabla amplios.** `anon` y `authenticated` conservan
+  todos los privilegios de tabla sobre `audit_logs` (default privileges),
+  incluido `TRUNCATE`, que RLS no cubre. Hoy no es explotable (PostgREST no
+  expone `TRUNCATE`, RLS sin policies bloquea las filas y ninguna RPC hace
+  SQL dinámico). **Corrección futura:** `REVOKE` de todos los privilegios de
+  `anon`/`authenticated` en una migración (mismo hallazgo que la sección Q).
+- 🟢 **Informativo:**
+  - Writers únicamente vía RPCs SECURITY DEFINER ejecutables solo por
+    `service_role`, con actor validado por `assert_loyalty_actor`.
+  - Sin `UPDATE`/`DELETE` en código; `created_at` lo fija la base.
+  - Nadie lee la tabla para decisiones: integridad forense/operacional.
+  - `service_role` puede modificar o borrar filas (no hay inmutabilidad a
+    nivel de base); ningún código lo hace. Frontera aceptada, como en `0026`.
+  - Las FKs `on delete set null` vacían referencias si se borra un
+    cliente, ciclo, visita o recompensa (solo `service_role`/`postgres`
+    pueden borrar esas filas).
+  - `actor_role` admite `customer` en el `CHECK`, pero ningún writer actual
+    lo usa (`assert_loyalty_actor` lo rechaza desde `0018`).
+  - `logAudit` del frontend es un mock en memoria (modo demo), sin efecto en
+    Supabase.
+
+### Pendientes
+
+- Verificación remota de solo lectura (SQL Editor). Valores esperados según el
+  modelo local: `a_rls` `enabled=t`, `b_policies` `0`, `d_triggers` `0`,
+  `e_writer_funcs` con `anon=false auth=false`, `g_future_rows` `0`. En
+  `f_by_role_action`, cualquier fila con `actor_role = customer` sería
+  anterior a `0018` y conviene revisarla:
+
+```sql
+select 'a_rls' as k, format('enabled=%s forced=%s', relrowsecurity, relforcerowsecurity) as v from pg_class where oid = 'public.audit_logs'::regclass
+union all select 'b_policies', count(*)::text from pg_policies where schemaname = 'public' and tablename = 'audit_logs'
+union all select 'c_priv', r || ': ' || coalesce(string_agg(p, ',' order by p) filter (where has_table_privilege(r, 'public.audit_logs', p)), '-') from unnest(array['anon','authenticated','service_role']) r, unnest(array['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) p group by r
+union all select 'd_triggers', count(*)::text from pg_trigger where tgrelid = 'public.audit_logs'::regclass and not tgisinternal
+union all select 'e_writer_funcs', p.proname || ' secdef=' || p.prosecdef || ' anon=' || has_function_privilege('anon', p.oid, 'execute') || ' auth=' || has_function_privilege('authenticated', p.oid, 'execute') from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.prosrc ~* 'audit_logs'
+union all select 'f_by_role_action', actor_role || ' / ' || action || ' = ' || count(*) from public.audit_logs group by actor_role, action
+union all select 'g_future_rows', count(*)::text from public.audit_logs where created_at > now()
+union all select 'h_total', count(*)::text from public.audit_logs
+order by 1, 2;
+```
+
+- Revocar los grants sobrantes de `anon`/`authenticated` (🔵), junto con los
+  de `customers` (sección Q).
+- Opcional: inmutabilidad también frente a `service_role` (trigger que
+  rechace `UPDATE`/`DELETE`) si se quiere un registro append-only estricto.
+
+**No se modificó** en esta auditoría: código, migraciones, Edge Functions,
+RPCs, RLS, grants, configuración, base de datos remota ni tests; solo este
+README.
+
 ## Documentation
 
 - [`docs/security-hardening.md`](docs/security-hardening.md) — **Security
