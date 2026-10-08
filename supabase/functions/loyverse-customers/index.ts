@@ -27,7 +27,7 @@
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { runLoyverseSync } from "../_shared/syncClaim.js";
-import { resolveTrustedCustomerCode } from "../_shared/loyverseCore.js";
+import { resolveTrustedCustomerCode, resolveTrustedPhone } from "../_shared/loyverseCore.js";
 import { readDefaultKey } from "../_shared/supabaseKeys.js";
 
 const LOYVERSE_BASE = "https://api.loyverse.com/v1.0/customers";
@@ -208,12 +208,11 @@ Deno.serve(async (req) => {
       .maybeSingle();
 
     // C4: el email de identidad SIEMPRE viene de GoTrue (user.email).
-    // body.email se ignora: el cliente no puede mutar el correo. phone
-    // queda SOLO como auxiliar de relleno sobre el target resuelto por
-    // email (el match únicamente por teléfono está vetado en el core).
+    // body.email se ignora: el cliente no puede mutar el correo. El
+    // teléfono sale SOLO de customers.phone (ver resolveTrustedPhone más
+    // abajo); body.phone, user.phone y la metadata nunca son fuente.
     const name = body.name || profile?.name || user.user_metadata?.name || "";
     const email = user.email || profile?.email || null;
-    const phone = body.phone || profile?.phone || user.phone || null;
 
     // customer_code: SIEMPRE el de la fila `customers` del usuario
     // autenticado. Un valor distinto en el body se rechaza (409) sin
@@ -240,6 +239,15 @@ Deno.serve(async (req) => {
       return json({ ok: false, code: codeCheck.code, traceId, retriable: false }, codeCheck.status);
     }
     const customerCode = codeCheck.customerCode;
+
+    // phone: SIEMPRE customers.phone. body.phone solo puede confirmarlo;
+    // si no coincide (o la base no tiene teléfono) → 409 phone_mismatch
+    // sin llamar a Loyverse. La respuesta nunca incluye ningún teléfono.
+    const phoneCheck = resolveTrustedPhone({ requestedPhone: body.phone, profile });
+    if (!phoneCheck.ok) {
+      return json({ ok: false, code: phoneCheck.code, traceId, retriable: false }, phoneCheck.status);
+    }
+    const phone = phoneCheck.phone;
 
     if (!name) return json({ ok: false, code: "missing_name", retriable: false }, 400);
 

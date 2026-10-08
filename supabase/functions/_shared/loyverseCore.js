@@ -145,6 +145,45 @@ export function resolveTrustedCustomerCode({ requestedCode, profile }) {
   return { ok: true, customerCode: trusted };
 }
 
+// Teléfono confiable para el sync (customers.phone es la ÚNICA fuente).
+// Contrato de 0025: customers.phone es NULL o '+52' + exactamente 10
+// dígitos ASCII. Mismo patrón que el CHECK customers_phone_e164_mx_check;
+// sin normalizar: espacios, guiones, otros países o dígitos Unicode NO
+// son válidos aquí.
+export const MX_E164_PHONE_PATTERN = /^\+52[0-9]{10}$/;
+
+export function isCanonicalMxPhone(value) {
+  return typeof value === "string" && MX_E164_PHONE_PATTERN.test(value);
+}
+
+// El body solo puede CONFIRMAR el teléfono de la base (el frontend envía
+// profile.phone por compatibilidad); nunca lo sustituye:
+//   * ausente / null / ""          → se usa customers.phone (puede ser NULL).
+//   * no-string                    → 400 invalid_body.
+//   * sin perfil                   → null: runLoyverseSync responde
+//                                    no_profile y el body nunca se usa.
+//   * customers.phone NULL         → 409 phone_mismatch (el body no rellena).
+//   * no canónico o distinto       → 409 phone_mismatch (no se llama a
+//                                    Loyverse).
+//   * idéntico a customers.phone   → se usa el de la base.
+export function resolveTrustedPhone({ requestedPhone, profile }) {
+  const trusted = profile && typeof profile.phone === "string" && profile.phone !== "" ? profile.phone : null;
+
+  if (requestedPhone === undefined || requestedPhone === null || requestedPhone === "") {
+    return { ok: true, phone: trusted };
+  }
+  if (typeof requestedPhone !== "string") {
+    return { ok: false, status: 400, code: "invalid_body" };
+  }
+  if (!profile) {
+    return { ok: true, phone: null };
+  }
+  if (!trusted || !isCanonicalMxPhone(requestedPhone) || requestedPhone !== trusted) {
+    return { ok: false, status: 409, code: "phone_mismatch" };
+  }
+  return { ok: true, phone: trusted };
+}
+
 export function isDuplicateCustomerCodeError(error) {
   const message = String(error?.message || "").toLowerCase();
   const body = String(error?.body || "");
