@@ -15,6 +15,10 @@
 //     se hacen con UN SEGUNDO cliente service_role (nunca con el RLS del
 //     usuario), siempre scoped por el auth_user_id verificado del JWT. El
 //     frontend no tiene privilegios sobre esas columnas (migración 0008).
+//   * Los eventos de customer_sync_events se escriben SOLO con el cliente
+//     service_role (migración 0026: el usuario solo puede leer los suyos).
+//     Un fallo al registrar el evento no cambia la respuesta: queda en los
+//     logs de la función como customer_sync_event_insert_failed.
 //   * La identidad de contacto (email) SIEMPRE viene de GoTrue
 //     (user.email): la petición no puede mutar el correo (C4).
 //   * No expone el token de Loyverse ni detalles internos en las
@@ -28,6 +32,7 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { runLoyverseSync } from "../_shared/syncClaim.js";
 import { resolveTrustedCustomerCode, resolveTrustedPhone } from "../_shared/loyverseCore.js";
+import { recordSyncEvent } from "../_shared/syncEvents.js";
 import { readDefaultKey } from "../_shared/supabaseKeys.js";
 
 const LOYVERSE_BASE = "https://api.loyverse.com/v1.0/customers";
@@ -139,13 +144,11 @@ function createClaimDb(admin) {
   };
 }
 
-async function logSyncEvent(supabase, { authUserId, traceId, eventType, detail }) {
-  await supabase.from("customer_sync_events").insert({
-    auth_user_id: authUserId,
-    trace_id: traceId,
-    event_type: eventType,
-    detail: { ...detail, traceId },
-  });
+// Writer único de customer_sync_events: SIEMPRE se llama con `admin`
+// (service_role). No lanza ni altera la respuesta si el INSERT falla
+// (ver _shared/syncEvents.js).
+async function logSyncEvent(admin, event) {
+  return recordSyncEvent(admin, event);
 }
 
 Deno.serve(async (req) => {
@@ -217,8 +220,8 @@ Deno.serve(async (req) => {
     // customer_code: SIEMPRE el de la fila `customers` del usuario
     // autenticado. Un valor distinto en el body se rechaza (409) sin
     // llamar a Loyverse y queda auditado (customer_sync_events, escrito
-    // con service_role). Nota: la policy actual de esa tabla permite al
-    // cliente editar/borrar SUS eventos — hallazgo reportado aparte.
+    // con service_role, como todos los eventos; desde 0026 el cliente solo
+    // puede leer los suyos).
     const codeCheck = resolveTrustedCustomerCode({ requestedCode: body.customerCode, profile });
     if (!codeCheck.ok) {
       if (codeCheck.code === "customer_code_mismatch") {
@@ -281,7 +284,7 @@ Deno.serve(async (req) => {
       const result = outcome.result;
 
       if (result.status === "conflict") {
-        await logSyncEvent(supabase, {
+        await logSyncEvent(admin, {
           authUserId: user.id,
           traceId,
           eventType: "loyverse_conflict",
@@ -316,7 +319,7 @@ Deno.serve(async (req) => {
         .eq("auth_user_id", user.id);
       if (linkError) throw linkError;
 
-      await logSyncEvent(supabase, {
+      await logSyncEvent(admin, {
         authUserId: user.id,
         traceId,
         eventType:
@@ -336,7 +339,7 @@ Deno.serve(async (req) => {
         loyverseCustomerId: result.loyverseCustomerId,
       });
     } catch (error) {
-      await logSyncEvent(supabase, {
+      await logSyncEvent(admin, {
         authUserId: user.id,
         traceId,
         eventType: "loyverse_error",

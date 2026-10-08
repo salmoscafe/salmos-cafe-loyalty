@@ -40,11 +40,14 @@ complete"** (ver secciones N y O).
   Edge `auth-phone-login` (el email nunca llega al navegador).
   **Auth Staff/Admin**: Supabase Auth + rol en `public.profiles` (`0013`);
   el PIN solo existe en modo demo (sin `.env`).
-- **Migraciones `0001`–`0023`** presentes localmente; `supabase migration
-  list` reportó local = remoto hasta `0023` (verificación del equipo,
-  2026-10-07). Ver sección G.
-- **Security Hardening `0018`–`0023`: aplicado.** Resumen abajo; detalle en
-  [`docs/security-hardening.md`](docs/security-hardening.md).
+- **Migraciones `0001`–`0026`** presentes localmente y aplicadas en remoto
+  (verificación del equipo; la última, `0026`, el 2026-10-08). Ver sección G.
+- **Security Hardening `0018`–`0026`: aplicado**, incluida la identidad
+  telefónica (`0021`–`0025`) y la Fase 2A de `customer_sync_events` (`0026`
+  + `loyverse-customers` v17). Resumen abajo; detalle en
+  [`docs/security-hardening.md`](docs/security-hardening.md),
+  [`docs/security-hardening-phone.md`](docs/security-hardening-phone.md) y la
+  sección Q.
 - QA 2026-09-15 (histórico): 297 receipts procesados, 4 visitas
   reconstruidas para el cliente de prueba (order `4 → 3 → 2 → 1` en
   Actividad).
@@ -77,14 +80,19 @@ complete"** (ver secciones N y O).
 | `0020` — `resolve_email_for_login` solo `service_role`; `email_is_registered` | ✅ Aplicada |
 | `0021`–`0023` — teléfono canónico E.164 MX, `phone_is_registered`, cliente sin UPDATE de `customers.phone` | ✅ Aplicadas |
 | Edge `auth-phone-login` (login/recuperación por teléfono sin exponer email) | ✅ Desplegada |
-| `loyverse-customers`: `customerCode` confiable (409) + fix E.164 `+52` | ✅ Desplegada |
-| Validación de `body.phone`/`body.name` en `loyverse-customers` | ⏳ Pendiente |
-| `0024` backfill de teléfonos de registro · `0025` unicidad canónica | ⏳ Pendiente |
-| `customer_sync_events` solo `service_role` · CAPTCHA (hoy Disabled) | ⏳ Pendiente |
+| `loyverse-customers` v17: `customerCode` y teléfono siempre de `customers` (`409` si el body difiere); eventos con `service_role` | ✅ Desplegada (v17) |
+| `body.phone` en `loyverse-customers` (`customers.phone` autoritativo, sin fallback a `user.phone`) | ✅ Resuelto — Fase 2A / v17 (fix `1f617af`) |
+| `body.name` en `loyverse-customers` (el body aún tiene prioridad para el nombre) | ⏳ Pendiente (bajo) |
+| `0024` backfill controlado de teléfonos (whitelist de 3 usuarios aprobados) | ✅ Aplicada (`f10ce69`) |
+| `0025` — `CHECK` E.164 MX en `customers.phone` (`+52` + 10 dígitos) | ✅ Aplicada (`2d715c5`) |
+| `0026` — `customer_sync_events` backend-only (escritura solo `service_role`) | ✅ Aplicada — Fase 2A |
+| CAPTCHA / Bot Protection en Supabase Auth (hoy Disabled) | ⏳ Pendiente |
 
 Fuente de verdad del teléfono: **`customers.phone`** (canónico
-`+52XXXXXXXXXX`). Detalle, contratos y pendientes:
-[`docs/security-hardening.md`](docs/security-hardening.md).
+`+52XXXXXXXXXX`, obligatorio desde `0025`). Detalle, contratos y pendientes:
+[`docs/security-hardening.md`](docs/security-hardening.md),
+[`docs/security-hardening-phone.md`](docs/security-hardening-phone.md) y la
+sección Q.
 
 ## C. Arquitectura
 
@@ -176,10 +184,13 @@ contador almacenado** en el esquema.
    `SC-XXXXXXXX` como token QR) y dispara la **sincronización Loyverse**
    **solo a través de la Edge Function** `loyverse-customers` — nunca
    directo.
-3. La Edge Function (con el JWT del usuario, RLS) resuelve el cliente de
-   Loyverse: busca por **email** → busca por **teléfono** → **vincula** o
-   **crea**, con reglas conservadoras y defensa de concurrencia (claim
-   atómico por fila). El resultado queda en `loyverse_customer_id`.
+3. La Edge Function lee la fila `customers` del usuario con su JWT (RLS) y
+   toma `customerCode` y teléfono **solo** de esa fila (si el body difiere →
+   `409`). Resuelve el cliente de Loyverse: busca por **email** → busca por
+   **teléfono** → **vincula** o **crea**, con reglas conservadoras y defensa
+   de concurrencia (claim atómico por fila). El resultado queda en
+   `loyverse_customer_id`; esa columna, el claim y los eventos de
+   `customer_sync_events` se escriben con `service_role`.
 4. Un **cron externo** invoca `loyverse-receipts-sync` con `x-sync-secret`:
    consulta `GET /v1.0/receipts` por ventana `updated_at` incremental y, por
    cada receipt elegible, registra la visita (o la revierte si fue cancelado)
@@ -193,7 +204,7 @@ UI ── authService/ ──► Supabase Auth ──► customers (Postgres, RL
      (facade)         (registro/login)      │
                                             ▼
             Edge Function loyverse-customers ──► api.loyverse.com
-            (JWT del usuario, RLS)               /v1.0/customers
+            (lee con JWT; escribe con service_role) /v1.0/customers
                                                     (token SOLO aquí)
 ```
 
@@ -204,7 +215,7 @@ UI ── authService/ ──► Supabase Auth ──► customers (Postgres, RL
 | Tabla | Propósito |
 |---|---|
 | `customers` | Un cliente por `auth_user_id`; `customer_code` único `SC-XXXXXXXX`; `loyverse_customer_id` único; columnas de claim de sync (`loyverse_sync_claim`/`_at`) y estado (`loyverse_sync_status`) |
-| `customer_sync_events` | Auditoría de sync de clientes (`loyverse_linked`, `created`, `updated`, `conflict`, `error`) |
+| `customer_sync_events` | Auditoría técnica del sync de clientes (`loyverse_linked`, `loyverse_created`, `loyverse_updated`, `loyverse_already_linked`, `loyverse_conflict`, `loyverse_error`); solo la escribe el backend (`0026`) |
 | `loyalty_cycles` | Ciclo de fidelidad del cliente; **`required_visits`** (`7` vigente; default histórico `8`); `status` (`active`/`completed`) |
 | `loyalty_visits` | Cada compra elegible registrada: `external_sale_id` UNIQUE, `amount`, `visit_date`, `store_id`, `employee_id`, `timestamp`, `source`, `status` (`active`/`cancelled`), `items` (jsonb), `receipt_date`, `verse_id` |
 | `rewards` | Recompensas: `status` (`available`/`redeemed`/`cancelled`), `max_value` (150), `expires_at` (3 meses), `triggered_reward_id` |
@@ -219,10 +230,18 @@ UI ── authService/ ──► Supabase Auth ──► customers (Postgres, RL
   auth_user_id`). Las RPCs de escritura corren `SECURITY DEFINER` (grants
   exclusivos de `service_role`); el navegador no las invoca con permisos de
   cliente.
-- **`customers`** (migración `0008`, H1): el frontend solo tiene
-  `SELECT` + `INSERT`/`UPDATE` limitados a columnas públicas (name, email,
-  phone, profile, customer_code); las columnas internas `loyverse_*` solo las
+- **`customers`** (migraciones `0008`, H1, y `0023`): el frontend solo
+  tiene `SELECT`, `INSERT` de columnas públicas (`auth_user_id`, name, email,
+  phone, customer_code, profile) y `UPDATE` de `name`, `email`, `profile`
+  (sin `phone` desde `0023`); las columnas internas `loyverse_*` solo las
   escribe la Edge Function con `service_role`.
+- **`customers.phone`**: `customers_phone_e164_mx_check` (`0025`) impide
+  guardar teléfonos fuera de `+52` + 10 dígitos; `customers_phone_unique_key`
+  (`0008`, sobre los dígitos) evita duplicar el mismo número aunque se
+  escriba con otra puntuación o formato equivalente.
+- **`customer_sync_events`** (`0026`): solo `service_role` escribe;
+  `authenticated` solo lee sus propios eventos (policy
+  `sync_events_select_own`); `anon` sin privilegios.
 - **Identidad de contacto**: email/teléfono normalizados con índices únicos
   parciales (C4); el email de identidad siempre viene de GoTrue.
 - **Progreso y expiración derivados**: sin contador almacenado, sin cron de
@@ -259,6 +278,9 @@ Todas las migraciones viven en `supabase/migrations/`. Se aplican con
 | `0021_customers_phone_canonical.sql` | **Security:** normaliza `customers.phone` legacy a E.164 MX solo en casos seguros; auditoría sin teléfono completo |
 | `0022_phone_is_registered_pending.sql` | **Security:** `phone_is_registered` canónico + metadata del registro pendiente; helper privado `canonical_mx_phone` |
 | `0023_revoke_customer_phone_update.sql` | **Security:** anon sin UPDATE; authenticated solo UPDATE de `name`, `email`, `profile` |
+| `0024_customers_phone_backfill.sql` | **Security:** backfill `NULL → teléfono` solo para 3 `auth_user_id` aprobados; fuente `identity_data` = metadata; aborta ante cualquier anomalía (ver sección Q) |
+| `0025_customers_phone_e164_mx_check.sql` | **Security:** `CHECK` `customers.phone` `NULL` o `+52` + 10 dígitos; solo esquema, no toca filas (la unicidad la sigue dando `customers_phone_unique_key` de `0008`) |
+| `0026_customer_sync_events_backend_only.sql` | **Security (Fase 2A):** `customer_sync_events` backend-only: `anon` sin privilegios, `authenticated` solo `SELECT` de sus filas (`sync_events_select_own` reemplaza a `sync_events_own_all`); no toca esquema, datos ni `service_role` |
 
 ### Regla sobre migraciones (documental, vigente)
 
@@ -276,10 +298,10 @@ Todas las migraciones viven en `supabase/migrations/`. Se aplican con
 - Proyecto remoto: ref `gyugkrvdgxofnkfhzbeq`. Proyecto local
   (`supabase/config.toml`): `project_id = "App_Salmos_LC"`, API `:54321`,
   `max_rows = 1000`, PostgreSQL 17, Edge runtime Deno 2.
-- **Sincronizado hasta `0023`** (2026-10-07): `supabase migration list`,
-  ejecutado por el equipo, mostró local = remoto hasta
-  `0023_revoke_customer_phone_update`. Siguiente migración prevista: `0024`
-  (pendiente; ver `docs/security-hardening.md`).
+- **Aplicado hasta `0026`** (verificación del equipo): el 2026-10-07
+  `supabase migration list` mostró local = remoto hasta `0023`; después se
+  aplicaron `0024` y `0025` con sus pre-checks, y el 2026-10-08 `0026`, tras
+  desplegar y verificar `loyverse-customers` v17 (sección Q).
 
 ## H. Autenticación
 
@@ -318,7 +340,7 @@ Todas las migraciones viven en `supabase/migrations/`. Se aplican con
 
 | Función | `verify_jwt` | Rol | Protección |
 |---|---|---|---|
-| `loyverse-customers` | `true` | Sync/creación/vínculo de clientes | JWT del usuario (RLS) + `service_role` para columnas internas; `customerCode` siempre de la BD (mismatch → `409`) |
+| `loyverse-customers` | `true` | Sync/creación/vínculo de clientes (v17) | JWT del usuario (verificado) + `service_role` para columnas internas y para `customer_sync_events`; `customerCode` y teléfono siempre de `customers` (si el body difiere → `409`) |
 | `loyverse-receipts-sync` | `false` | Sync de receipts (scheduled) | Header `x-sync-secret` == `SYNC_CRON_SECRET`; claim atómico en `loyverse_sync_state`; service_role |
 | `send-ticket` | `true` | Enviar el ticket por correo | JWT del usuario; verificación de propiedad del ticket; correo destino SIEMPRE de GoTrue/customers |
 | `loyalty-engine` | `true` | Escrituras de lealtad (ver Roadmap) | JWT + validación de actor en el core; `0018` revalida el actor en la BD |
@@ -343,8 +365,15 @@ Todas las migraciones viven en `supabase/migrations/`. Se aplican con
   ventana `LOYVERSE_WINDOW_DAYS = 30`, monto mínimo $50, cliente no mapeado
   → nunca auto-crear, `TICKET_VERSE_IDS` (49 pasajes) y asignación de
   `verse_id` con Web Crypto (nunca `Math.random`).
+- `loyverseCore.js` también resuelve los datos confiables del sync:
+  `resolveTrustedCustomerCode` y `resolveTrustedPhone` (`customers` es la
+  única fuente; el body solo puede confirmar el valor).
 - `syncClaim.js` — claim atómico server-side (lease 10 min) contra el
   doble sync de clientes/receipts.
+- `syncEvents.js` — writer único de `customer_sync_events` (Fase 2A):
+  siempre con `service_role`; si el INSERT falla registra
+  `customer_sync_event_insert_failed` (solo `traceId`, `eventType`,
+  `authUserId` y código de error) sin cambiar la respuesta.
 - `smtpConn.js` — resolución del puerto SMTP (Gmail: implicit TLS 465).
 - `ticketEmail*.js` — render de los correos del ticket (versículos, Code
   128, `assertNoFakeData`).
@@ -366,16 +395,19 @@ Todas las migraciones viven en `supabase/migrations/`. Se aplican con
 
 ## J. Tests y validación
 
-- **`npm test` → 528/528 pasando en 32 archivos de test** · 0 fallos
-  (`node --test`, 2026-10-07).
-- **Tests de seguridad (96)** sobre PostgreSQL 17 real embebido
+- **`npm test` → 577/577 pasando en 35 archivos de test** · 0 fallos
+  (`node --test`, 2026-10-08). El baseline previo a la Fase 2A (545/545 en
+  33 archivos) también se verificó sin fallos.
+- **Tests de seguridad** sobre PostgreSQL 17 real embebido
   (`@electric-sql/pglite`, devDependency) con el harness
   `tests/helpers/supabaseSqlHarness.mjs` (roles anon/authenticated/
   service_role y default privileges de Supabase): `rpc-authorization`,
   `bible-verse-pool-security`, `login-alias-security`,
   `auth-phone-login-core`, `auth-phone-login-client`,
-  `loyverse-customer-code`, `loyverse-phone-e164`,
-  `phone-identity-migrations`, `customer-profile-phone`.
+  `loyverse-customer-code`, `loyverse-customer-phone`,
+  `loyverse-phone-e164`, `phone-identity-migrations`,
+  `customer-profile-phone`, `customer-sync-events-permissions` y
+  `loyverse-sync-events` (Fase 2A).
 - Cobertura de loyalty (documentada también en `docs/CURRENT_STATUS.md`):
   6 visitas → sin recompensa · 7 visitas → recompensa · 8.ª visita →
   pertenece al siguiente ciclo y no genera una segunda recompensa · ciclo
@@ -465,13 +497,13 @@ src/
   components/activity/        TicketVerse, ReceiptPrinter, Code128Barcode
   lib/                        supabase/client.js, utils/env.js, phone.js, psalms.js,
                               ticketVerse.js, saleOrdering.js, code128.js, receiptPdf.js
-tests/                        32 archivos node --test (*.test.mjs) + helpers/ (harness SQL)
+tests/                        35 archivos node --test (*.test.mjs) + helpers/ (harness SQL)
 email-templates/              fuente única de los 5 emails branded (confirm-signup,
                               reset-password, otp, change-email, welcome) + assets/
 scripts/                      build-templates-payload.py, patch-email-templates.ps1
 supabase/
   config.toml                 proyecto local, auth, templates, verify_jwt de funciones
-  migrations/                 0001-0023 (G)
+  migrations/                 0001-0026 (G)
   functions/                  6 Edge Functions + _shared/ (I)
 ```
 
@@ -502,9 +534,11 @@ supabase/
   `TicketVerse`.
 - ✅ Auth real de Staff/Admin (`profiles`, `0013`) y gestión de empleados
   (`admin-employees`).
-- ✅ Security Hardening `0018`–`0023` aplicado + Edges `auth-phone-login` y
-  `loyverse-customers` desplegadas (ver `docs/security-hardening.md`).
-- ✅ 528/528 tests pasando en 32 archivos de test; build OK.
+- ✅ Security Hardening `0018`–`0026` aplicado + Edges `auth-phone-login` y
+  `loyverse-customers` (v17) desplegadas (ver `docs/security-hardening.md`,
+  `docs/security-hardening-phone.md` y sección Q).
+- ✅ 577/577 tests pasando en 35 archivos de test (2026-10-08); build OK
+  (la Fase 2A no cambió el frontend).
 
 ## O. Qué está pendiente
 
@@ -531,14 +565,17 @@ supabase/
 - ⏳ SMTP real de `send-ticket` en el entorno de la Edge (hoy responde
   `email_not_configured` si no hay credenciales).
 - ⏳ Credenciales reales de Google OAuth (bloque comentado en `config.toml`).
-- ⏳ **Security (siguiente fase)** — detalle en
-  `docs/security-hardening.md` § Pending:
-  - `0024`: backfill controlado `raw_user_meta_data.phone → customers.phone`
-    (auditar antes los registros actuales; solo casos `ok`).
-  - `0025`: unicidad sobre el teléfono canónico (después del backfill).
-  - Validar `body.phone`/`body.name` en `loyverse-customers` (hoy el body
-    todavía tiene prioridad).
-  - `customer_sync_events`: evaluar escritura/lectura solo `service_role`.
+- ✅ **Fase 2A**: desplegada (v17), aplicada (`0026`) y documentada en este
+  commit de `main` del 2026-10-08 (`index.ts`, `_shared/syncEvents.js`,
+  `0026`, 2 tests y este README).
+- ⏳ **Security (siguiente fase)** — hallazgos abiertos de la sección Q:
+  - `body.name` en `loyverse-customers` (el body aún tiene prioridad sobre
+    el nombre; impacto bajo).
+  - Ventana de `phone_is_registered` para usuarios confirmados sin fila.
+  - Email del `INSERT` de `customers` desde Supabase Auth.
+  - Verificación del teléfono (SMS) o alta de la fila desde el backend.
+  - Revocar grants sobrantes de `anon`/`authenticated` en `customers` y
+    `audit_logs` (defensa en profundidad).
   - CAPTCHA / Bot Protection en Supabase Auth (hoy Disabled).
 - ⏳ Publicar el frontend (hosting + variables `VITE_*` + URL Configuration
   de Auth).
@@ -607,11 +644,306 @@ supabase/
   ("¡Disponible para canjear! · Vence el {fecha}", `currentReward.expiresAt`)
   sin cambiar la regla de 3 meses.
 
+## Q. Auditoría de identidad telefónica
+
+- **Fecha:** 2026-10-08 (actualización; la auditoría inicial es del
+  2026-10-07).
+- **Estado:** auditoría completada + hardening posterior aplicado y
+  verificado en remoto.
+- **Etapas** (se documentan por separado; ninguna reescribe a la anterior):
+  1. **Auditoría inicial** (2026-10-07, `main` @ `f10ce69`, migraciones
+     `0001`–`0024`): solo inspección, sin cambios. Privilegios y policies se
+     verificaron sobre el modelo local (harness
+     `tests/helpers/supabaseSqlHarness.mjs`) porque esa sesión no tenía
+     acceso de lectura al proyecto remoto.
+  2. **Hardening posterior:** `0025` (`2d715c5`); `customers.phone` como
+     única fuente del teléfono en `loyverse-customers` (`1f617af`, desplegada
+     como v16); **Fase 2A** de `customer_sync_events`: `0026` +
+     `_shared/syncEvents.js` + `loyverse-customers` **v17**.
+  3. **Verificación remota** (equipo, 2026-10-08): código desplegado,
+     migraciones, grants, policies y un probe controlado (ver "Verificación
+     remota").
+
+### Alcance
+
+Archivos inspeccionados:
+
+- Auth y frontend: `src/services/auth/*` (`supabaseAuthService`,
+  `phoneLoginEdgeClient`, `authErrors`, `authService`, `mockAuthService`),
+  `src/lib/supabase/client.js`, `src/components/auth/RegisterForm.jsx` y
+  `AuthScreen.jsx`, `src/screens/client/Profile.jsx` y `Settings.jsx`,
+  `src/services/customers`, `src/services/loyverse/loyverseCustomerService.js`
+  y `src/services/loyverse/loyverseEdgeClient.js`.
+- Edge Functions: las 6 funciones; en especial
+  `supabase/functions/loyverse-customers/index.ts` y
+  `supabase/functions/_shared/` (`loyverseCore.js`, `syncClaim.js`,
+  `syncEvents.js`).
+- Migraciones `0001`–`0026` (en especial `0021`–`0026`). Historial git
+  consultado de forma pasiva.
+
+### Migraciones de identidad y teléfono (`0021`–`0026`)
+
+| Migración | Qué aporta |
+|---|---|
+| `0021` | Canonicaliza `customers.phone` legacy a `+52XXXXXXXXXX` solo en casos seguros; audita sin teléfono completo |
+| `0022` | `phone_is_registered` compara en forma canónica y también considera el teléfono de la metadata de Auth del registro pendiente (usuarios confirmados o creados hace menos de 24 h); helper privado `canonical_mx_phone` |
+| `0023` | Sin UPDATE directo de `customers.phone`: `anon` sin UPDATE; `authenticated` solo UPDATE de `name`, `email`, `profile` |
+| `0024` | Backfill controlado `NULL → teléfono` solo para los 3 registros históricos aprobados (whitelist); aborta ante cualquier anomalía |
+| `0025` | `CHECK` `customers_phone_e164_mx_check`: `customers.phone` es `NULL` o `+52` + 10 dígitos (E.164 MX); impide guardar teléfonos en otro formato. No crea unicidad: los duplicados los sigue evitando `customers_phone_unique_key` (`0008`). Solo esquema, no toca filas |
+| `0026` | Fase 2A: `customer_sync_events` solo la escribe el backend (`service_role`); `authenticated` solo lee sus propios eventos; `anon` sin privilegios |
+
+### Writers de `customers.phone`
+
+| Ubicación | Operación | Fuente del teléfono | Quién | ¿Sobrescribe? | Tipo |
+|---|---|---|---|---|---|
+| `ensureCustomerProfile` (`supabaseAuthService.js`) | `INSERT` de la fila propia (1 vez) | parámetro explícito → `user_metadata.phone`, canonicalizado con `toE164Mx`; si no normaliza, `NULL` | usuario autenticado (RLS: solo su `auth_user_id`) | No: si la fila existe la devuelve; nunca hace UPDATE | Legítimo |
+| `ensureCustomerProfile`, rama `23505` en `customers_phone_unique_key` | re-`INSERT` con `phone = NULL` + `phoneConflict` | — | usuario autenticado | No toca al otro customer | Legítimo |
+| `0021_customers_phone_canonical.sql` | `UPDATE` legacy → E.164 MX (casos seguros) | el propio `customers.phone` | migración (`postgres`) | Solo normaliza formato | Legítimo (una vez) |
+| `0024_customers_phone_backfill.sql` | `UPDATE NULL → teléfono` | `auth.identities.identity_data.phone` = metadata | migración (`postgres`) | No (abortaría) | Legítimo (whitelist de 3) |
+| PostgREST `POST /customers` directo | `INSERT` de la fila propia | lo que envíe el cliente; desde `0025` solo `NULL` o `+52` + 10 dígitos | usuario autenticado sin fila previa | No (sin UPDATE de `phone` ni DELETE) | **Indirecto** (ver hallazgos) |
+| `auth.updateUser({ data })` (Supabase Auth) | escribe `raw_user_meta_data` | lo que envíe el cliente | cualquier usuario con sesión (la app no lo usa: solo `updateUser({ password })`) | Solo llega a `customers.phone` si la fila **aún no existe** | **Indirecto** |
+| `loyverse-customers` (`index.ts`) | `UPDATE` solo de `loyverse_*` y claim; `INSERT` en `customer_sync_events` (todo con `service_role`) | — | Edge (secret key) | No toca `phone`: lo lee de `customers` | Parece capaz, no lo hace |
+| `admin-employees` | `INSERT/UPDATE` en `profiles`, `createUser` con `{ name }` | — | admin | No toca `customers` | Falso positivo |
+| `ensureLoyaltyProfile` (`customerService.js`) | escribe `mockDatabase` en memoria | — | frontend | No toca Supabase | Dev bridge |
+
+Ninguna función SQL/RPC escribe `customers` (solo leen `0018`, `0020` y
+`0022`); `0025` no escribe, solo restringe el formato. Solo
+`customers_set_updated_at` (BEFORE UPDATE) se dispara sobre la tabla. No
+existe pantalla, endpoint ni RPC para **cambiar** el teléfono: `Profile.jsx`
+lo muestra en solo lectura y "Datos personales" en `Settings.jsx` es un texto
+sin acción. El historial git no muestra ningún escritor adicional eliminado.
+
+### Flujo actual
+
+1. **Registro:** `RegisterForm` acepta solo dígitos (máx. 10), exige
+   exactamente 10 y envía `"+52 " + 10 dígitos`. Antes de enviar consulta
+   `phone_is_registered` (anon).
+2. `signUpWithEmail` guarda `toE164Mx(phone)` (`+52XXXXXXXXXX`) en
+   `raw_user_meta_data.phone`. Supabase Auth copia esa clave a
+   `auth.identities.identity_data` de la identidad `email`.
+3. **Primer inicio de sesión** (email, teléfono vía `auth-phone-login`,
+   recuperación u OAuth): `buildSession → ensureCustomerProfile(user, {})`
+   crea la fila con el teléfono de la metadata, canonicalizado; si no
+   normaliza, `NULL`; si el número ya es de otro cliente (`23505`), la fila
+   se crea con `NULL` y `phoneConflict`. `auth.users.phone` no se usa.
+4. **Inicios posteriores:** `ensureCustomerProfile` devuelve la fila
+   existente antes de cualquier escritura. La metadata no se vuelve a leer y
+   `customers.phone` no cambia aunque el login no aporte teléfono.
+5. **Recuperación de contraseña:** solo `updateUser({ password })`.
+6. **Sync con Loyverse:** `loyverseCustomerService` → `loyverseEdgeClient`
+   envía `{ operation: "link_or_create", name, email, phone: profile.phone,
+   customerCode }` a `loyverse-customers`. La Edge toma el teléfono **solo**
+   de `customers.phone` y nunca lo escribe (ver "Edge Functions").
+
+**Defecto histórico resuelto:** `buildSession → ensureCustomerProfile(user,
+{})` creaba la fila con `phone = NULL` porque no leía la metadata. Desde
+`9cf06ea` una fila nueva toma el teléfono de la metadata, y una fila
+existente nunca se reescribe: el `{}` de un login posterior no puede borrar
+un teléfono. Las 3 filas históricas afectadas con teléfono recuperable se
+corrigieron con `0024` (usuarios aprobados 1, 2 y 3). No se identificó
+ningún flujo legítimo actual que elimine o sobrescriba un `customers.phone`
+existente.
+
+### Protecciones
+
+- **Privilegios de `customers` (modelo local):** `authenticated` puede INSERT
+  (`auth_user_id, name, email, phone, customer_code, profile`) y UPDATE
+  **solo** `name, email, profile`; sin DELETE. `anon` sin UPDATE. Policies
+  `customers_select/insert/update` limitadas a `auth.uid() = auth_user_id`;
+  RLS activado y **sin** policies para `anon`.
+- **Formato:** `customers_phone_e164_mx_check` (`0025`) impide guardar un
+  teléfono que no sea `NULL` o `+52` + 10 dígitos.
+- **Unicidad:** `auth_user_id` único (1 fila por usuario).
+  `customers_phone_unique_key` (`0008`) compara solo los dígitos, así que
+  evita duplicar el mismo número aunque se intente escribir con otra
+  puntuación o formato equivalente.
+- **RPCs:** `resolve_email_for_login` solo `service_role`;
+  `phone_is_registered` y `email_is_registered` (anon/authenticated) solo
+  devuelven booleano; `canonical_mx_phone` privado; las RPCs del motor de
+  lealtad, solo `service_role`.
+- **`customer_sync_events`** (`0026`): escritura solo `service_role`; ver
+  "Fase 2A".
+
+### Edge Functions
+
+- `auth-phone-login` (pública): solo lee y nunca devuelve email.
+- `loyverse-customers` **v17** — comportamiento vigente:
+  - `customers.phone` es la fuente autoritativa; `body.phone` ya no puede
+    sustituirlo.
+  - `body.phone` ausente, `null` o `""` → se usa `customers.phone`.
+  - `body.phone` no-string → `400 invalid_body`.
+  - `body.phone` string distinto del de `customers`, no canónico, o con
+    `customers.phone` vacío → `409 phone_mismatch`, **sin llamar a
+    Loyverse**.
+  - Sin fallback a `user.phone` ni a la metadata; esta función nunca
+    actualiza `customers.phone`.
+  - `customerCode` siempre de `customers` (distinto → `409
+    customer_code_mismatch`, auditado y sin llamar a Loyverse); email siempre
+    de Supabase Auth.
+  - Eventos de `customer_sync_events` escritos con `service_role` (Fase 2A).
+  - Comportamiento anterior, **ya no vigente**:
+    `phone = body.phone || profile?.phone || user.phone || null`.
+  - `body.name` sigue teniendo prioridad sobre `customers.name` (ver
+    hallazgos).
+
+### Fase 2A — `customer_sync_events`
+
+**Problema** (auditoría de `customer_sync_events`, 2026-10-07): la policy
+`sync_events_own_all` (`FOR ALL`) permitía al dueño insertar, modificar y
+borrar sus propios eventos, y 3 de los 4 puntos de escritura de
+`customer_sync_events` en la Edge usaban el JWT del usuario, así que un
+evento real y uno fabricado eran indistinguibles.
+
+**Implementación:**
+
+- `supabase/functions/loyverse-customers/index.ts`: las 4 llamadas de
+  `logSyncEvent` usan el cliente `admin` (`service_role`).
+- `supabase/functions/_shared/syncEvents.js` (nuevo): writer único con la
+  misma forma de fila (`auth_user_id`, `trace_id`, `event_type`, `detail`,
+  con el `traceId` del servidor). Si el INSERT falla (`{ error }` o
+  excepción) registra `customer_sync_event_insert_failed` con solo `traceId`,
+  `eventType`, `authUserId` y el código de error (sin `detail`, sin
+  `error.message`, sin datos de contacto). El fallo **no** interrumpe la
+  operación principal ni cambia la respuesta HTTP.
+- `supabase/migrations/0026_customer_sync_events_backend_only.sql`: `anon`
+  sin privilegios; `authenticated` solo `SELECT`; `sync_events_own_all`
+  reemplazada por `sync_events_select_own`. Sin policy de escritura, un
+  `GRANT` accidental futuro no reabre la escritura. No toca columnas,
+  constraints, índices, datos, `event_type`, `service_role` ni default
+  privileges.
+- Orden aplicado: deploy y verificación de la Edge (v17) → después `0026`.
+
+**Estado remoto confirmado (2026-10-08):**
+
+| Rol | Privilegios sobre `customer_sync_events` |
+|---|---|
+| `anon` | Ninguno |
+| `authenticated` | Solo `SELECT`, y por RLS solo sus propios eventos. `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES` y `TRIGGER` revocados |
+| `service_role` | Todos (sin cambios) |
+
+Única policy: `sync_events_select_own` (`FOR SELECT TO authenticated USING
+(auth.uid() = auth_user_id)`). `sync_events_own_all` ya no existe.
+
+### Hallazgos (vigentes al 2026-10-08)
+
+- 🔴 **Crítico:** ninguno.
+- ✅ **RESUELTO — Fase 2A / v17: `body.phone` en `loyverse-customers`.**
+  Antes (Alto): `phone = body.phone || profile.phone || user.phone` permitía
+  crear o completar el cliente de Loyverse con un teléfono arbitrario y
+  sondear si un número existía en Loyverse. Corregido en `1f617af`
+  (desplegado primero como v16) y vigente en v17 (ver "Edge Functions").
+- ✅ **RESUELTO — `0026`: `customer_sync_events`.** Antes (Medio): editable
+  y borrable por su dueño (`sync_events_own_all`) y escrito con el JWT del
+  usuario. Ver "Fase 2A".
+- ✅ **Mitigado: teléfonos no canónicos y duplicados.** El `CHECK` de
+  `0025` impide guardar un `customers.phone` fuera de `+52` + 10 dígitos; el
+  índice `customers_phone_unique_key` (`0008`) impide duplicar un número
+  escribiéndolo con otra puntuación o formato.
+- 🟡 **Medio — teléfono inicial no verificado.** Al **crear** su fila
+  `customers` (por la app o con un `INSERT` directo vía PostgREST), un
+  usuario autenticado puede declarar como teléfono inicial cualquier número
+  **libre** en formato válido que no ha demostrado controlar. Ocurre
+  únicamente al crear la fila: RLS la limita a su propio `auth.uid()`, no
+  permite sobrescribir un `customers.phone` existente (sin UPDATE de
+  `phone`) y no da acceso al teléfono ni a la fila de otro usuario.
+  **Corrección futura:** verificación por SMS o creación de la fila desde el
+  backend.
+- 🟡 **Medio — reserva de números vía metadata.** Un usuario confirmado sin
+  fila `customers` (por ejemplo, que nunca abrió la app) puede escribir
+  cualquier número en su metadata con la API de Auth (`updateUser({ data
+  })`), y `phone_is_registered` lo reportará como ocupado **sin límite de
+  tiempo** (`0022` solo limita a 24 h a los no confirmados). Si el número
+  está libre y en formato válido, pasaría a su `customers.phone` al crear la
+  fila. **Corrección futura:** limitar la ventana también a confirmados, o
+  resolver el pre-chequeo en una Edge con rate limit.
+- 🟡 **Medio — relacionado (email, no teléfono).** Un usuario puede crear su
+  fila con el **email** de otra persona; cuando esa persona inicie sesión,
+  `ensureCustomerProfile` choca con `customers_email_unique_key`, no encuentra
+  fila propia y la sesión falla. **Corrección futura:** que el INSERT tome el
+  email de Supabase Auth (columna no insertable por el cliente o trigger).
+- 🔵 **Bajo — `body.name` en `loyverse-customers`.** `name = body.name ||
+  customers.name || metadata.name`: el body aún tiene prioridad. Solo afecta
+  el nombre en Loyverse: se usa al crear el cliente o para rellenar un nombre
+  vacío, y un nombre distinto nunca se sobrescribe (`skippedFields`). No toca
+  `customers`. **Corrección futura:** misma regla que el teléfono.
+- 🔵 **Bajo — grants de tabla amplios en `customers` y `audit_logs` (modelo
+  local; en remoto solo se verificaron los de `customer_sync_events`):**
+  `anon` conserva `SELECT/INSERT/DELETE/TRUNCATE` y `authenticated` conserva
+  `TRUNCATE`. RLS bloquea las operaciones de fila y PostgREST no expone
+  `TRUNCATE`, así que no es explotable por la API, pero conviene revocarlos
+  como defensa en profundidad.
+- 🔵 **Bajo — divergencia esperada Auth ↔ customers.** Un usuario puede
+  cambiar `raw_user_meta_data.phone` con la API de Auth, pero eso **no**
+  modifica `customers.phone`: Supabase Auth no la propaga, ningún trigger ni
+  función la copia y la app solo la lee al crear la fila. Poder modificar la
+  metadata no equivale a poder modificar `customers.phone`, que es el que
+  manda (también para Loyverse desde v16).
+- 🟢 **Correcto:**
+  - `customers.phone` no puede ser actualizado directamente por `anon` ni
+    `authenticated` (`0023`).
+  - El formato de `customers.phone` está restringido a `+52XXXXXXXXXX`
+    (`0025`).
+  - `loyverse-customers` ya no confía en `body.phone`.
+  - `customer_sync_events` ya no puede ser escrito, modificado ni eliminado
+    directamente por usuarios autenticados (`0026`).
+  - Ningún flujo de la app actualiza, sobrescribe ni pone en `NULL` un
+    `customers.phone` existente; el cliente no puede hacer DELETE de
+    `customers`; `0024` realizó un backfill controlado de exactamente tres
+    registros históricos previamente aprobados y no abrió un mecanismo
+    general de escritura de teléfonos; `auth-phone-login` no escribe nada.
+
+### Pendientes
+
+`body.name` en `loyverse-customers` ·
+ventana de `phone_is_registered` para usuarios confirmados sin fila · email
+del INSERT desde Supabase Auth · verificación del teléfono (SMS) o alta de la
+fila desde el backend · revocar grants sobrantes en `customers` y
+`audit_logs` · CAPTCHA.
+
+### Verificación remota
+
+Ejecutada por el equipo el 2026-10-08 (CLI de Supabase y SQL de solo
+lectura):
+
+- `loyverse-customers` desplegada como **v17**.
+- `index.ts` y `_shared/syncEvents.js` remotos coinciden con el código local.
+- `0026` aplicada; grants de `anon`, `authenticated` y `service_role` y la
+  policy, confirmados (tabla de la Fase 2A).
+- **Probe controlado único** con `customerCode = "PHASE2A-PROBE"` (valor
+  artificial: el `CHECK` de `customer_code` lo hace imposible para un cliente
+  real). El mismatch se resuelve antes de cualquier llamada a Loyverse.
+  - Respuesta: `HTTP 409 Conflict`, `code: customer_code_mismatch`.
+  - Se registró el `customer_sync_events` correspondiente: `loyverse_conflict`
+    con el `traceId` de la respuesta, sin teléfono, email ni secretos.
+  - No se creó ningún customer con `PHASE2A-PROBE`; total de customers
+    después del probe: 7.
+
+Verificación local: `npm test` → 577/577 en 35 archivos (baseline previo:
+545/545 en 33).
+
+### Qué no se modificó
+
+- **Auditoría inicial (2026-10-07):** solo inspección. No cambió código,
+  migraciones, Edge Functions, RLS, RPCs, configuración, base de datos remota
+  ni `docs/`; solo este README.
+- **Hardening posterior:** sí cambió código y base de datos, en fases
+  separadas y autorizadas: `0024` (`f10ce69`), `0025` (`2d715c5`),
+  `loyverse-customers` (`1f617af`, v16), `docs/security-hardening-phone.md`
+  (`bf3c686`) y la Fase 2A (v17 + `0026`, documentada en este commit de
+  `main` del 2026-10-08).
+- **En ninguna etapa** se modificaron el modelo de datos de
+  `customer_sync_events` (columnas, constraints, índices, `event_type`),
+  `audit_logs`, `loyverse-receipts-sync`, `loyalty-engine` ni las demás Edge
+  Functions.
+
 ## Documentation
 
 - [`docs/security-hardening.md`](docs/security-hardening.md) — **Security
   Hardening `0018`–`0023`**: estado, contratos, fuente de verdad del teléfono
   y pendientes de seguridad.
+- [`docs/security-hardening-phone.md`](docs/security-hardening-phone.md) —
+  hardening de identidad telefónica: `0024`, `0025` y `customers.phone` como
+  única fuente en `loyverse-customers`.
 - `docs/CURRENT_STATUS.md` — estado verificable del proyecto y checkpoint de la
   regla de 7 visitas.
 - `docs/AUTH_AND_LOYVERSE_FLOW.md` — flujo de auth y sincronización con Loyverse.
