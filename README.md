@@ -1155,6 +1155,230 @@ order by 1, 2;
 RPCs, RLS, grants, configuración, base de datos remota ni tests; solo este
 README.
 
+## S. Auditoría Fase 2C — Integridad de `customers.phone`
+
+- **Fecha:** 2026-10-08 · **Referencia:** `main` @ `aac15a7` (local).
+- **Estado:** completada — auditoría local y verificación remota
+  satisfactorias. Exclusivamente de inspección y documentación: **no se
+  realizaron cambios funcionales**.
+- **Objetivo:** confirmar que ningún flujo actual puede modificar,
+  sobrescribir o eliminar (`NULL`) el `phone` de un customer existente.
+
+### Alcance
+
+Writers de `customers.phone`, `ensureCustomerProfile`, metadata de Auth,
+RPCs, RLS, privilegios (tabla y columna), las 6 Edge Functions, frontend
+(registro, perfil, ajustes, login y recuperación por teléfono), migraciones
+`0018`–`0026`, historial git cuando fue relevante y verificación remota de
+producción. Complementa la sección Q (auditoría inicial y hardening de
+identidad telefónica), donde están las tablas detalladas de writers y flujo.
+
+### Writers encontrados
+
+| Tipo | Writer | Alcance |
+|---|---|---|
+| Histórico | `0021` | Canonicalización de teléfonos existentes (una vez, `postgres`) |
+| Histórico | `0024` | Backfill controlado de exactamente tres registros aprobados (una vez, `postgres`) |
+| Actual legítimo | `ensureCustomerProfile` | Solo en la **creación inicial** de la fila; nunca actualiza ni hace upsert sobre una fila existente |
+| Indirecto | `INSERT` directo vía PostgREST | El cliente autenticado puede crear **su propia** fila (RLS) y fijar ahí el teléfono inicial; no puede modificarlo después |
+
+Los dos históricos fueron migraciones ejecutadas una sola vez; no son
+writers funcionales actuales.
+
+**No existe actualmente** ningún writer funcional de aplicación que pueda
+ejecutar `UPDATE`, `UPSERT` o `DELETE` sobre `customers.phone`: ni en el
+frontend, ni en RPCs `public`, ni en triggers, ni en Edge Functions
+(`loyverse-customers` solo actualiza `loyverse_*` y el claim). Los únicos
+`UPDATE` históricos son los de `0021` y `0024`.
+
+### `ensureCustomerProfile`
+
+- Firma `(user, { name, email, phone })`; sus callers actuales
+  (`buildSession`, `retryLoyverseSync`) pasan `{}`, así que el teléfono sale
+  de `user_metadata.phone`.
+- Prioridad: teléfono explícito → `user_metadata.phone` → `null`, siempre
+  canonicalizado con `toE164Mx` (`+52` + 10 dígitos; si no normaliza,
+  `null`). **No** usa `auth.users.phone` ni lee el teléfono existente.
+- Si la fila ya existe, la devuelve **sin modificarla** (no hay `UPDATE` ni
+  `UPSERT`). Un login posterior no puede cambiar ni vaciar el teléfono.
+- Si no existe, hace `INSERT`. Un `23505` en `customers_phone_unique_key`
+  (número de otro cliente) reintenta con `phone = NULL` **para la fila
+  nueva** y marca `phoneConflict`; el customer existente no se toca.
+- No existe camino actual que convierta en `NULL` el teléfono de un customer
+  existente.
+- **Histórico:** antes de `9cf06ea` el `INSERT` tomaba `user.phone` (vacío
+  sin proveedor SMS), por lo que `buildSession → ensureCustomerProfile(user,
+  {})` podía **crear** customers sin teléfono. Se corrigió en `9cf06ea`
+  (lectura de `user_metadata.phone`) y los tres registros afectados se
+  cubrieron con `0024`. Incluso entonces, una fila existente nunca se
+  sobrescribía.
+
+### Flujo actual de teléfono
+
+Registro (`RegisterForm`: teléfono **opcional**; si se escribe, exactamente
+10 dígitos con prefijo `+52`) → `signUpWithEmail` lo guarda en
+`raw_user_meta_data.phone` → primer `buildSession` crea la fila con ese
+teléfono canonicalizado (o `NULL`) → logins posteriores no lo tocan →
+`loyverse-customers` lo **lee** de `customers`. No hay pantalla ni endpoint
+para cambiarlo (`Profile.jsx` lo muestra en solo lectura).
+
+### Auth metadata
+
+- `signUpWithEmail` guarda el teléfono en
+  `auth.users.raw_user_meta_data.phone`.
+- La API genérica de Supabase Auth permite a un usuario autenticado
+  modificar su propia metadata; el proyecto no usa `auth.updateUser({ data
+  })` (solo `updateUser({ password })`).
+- No existe propagación automática metadata → `customers.phone` (ningún
+  trigger, función ni Edge Function la copia). Tras crear el customer,
+  cambiar `metadata.phone` no modifica su `customers.phone`.
+- **Modificar `auth.users.raw_user_meta_data.phone` NO equivale a modificar
+  `customers.phone`.**
+
+### Edge Functions
+
+- **`auth-phone-login`** — pública (pre-sesión, `verify_jwt = false`);
+  autentica con correo + contraseña u OTP de correo según el flujo; usa
+  `resolve_email_for_login` con `service_role`. No escribe `customers.phone`.
+- **`loyverse-customers`** (v17) — requiere JWT y verifica al usuario
+  (`auth.getUser`); usa `service_role` para escrituras autorizadas
+  (`loyverse_*`, claim, eventos). **No escribe `customers.phone`.**
+  `body.phone` solo se compara con el teléfono confiable de `customers`:
+  ausente, `null` o `""` → usa `customers.phone`; no-string → `400
+  invalid_body`; no canónico, distinto o con `customers.phone` vacío → `409
+  phone_mismatch` sin llamar a Loyverse; idéntico → continúa.
+  Hallazgo histórico de `body.phone`: **RESUELTO respecto a
+  `customers.phone`**. `body.name` conserva prioridad sobre
+  `customers.name` (🔵, no afecta al teléfono).
+- `loyverse-receipts-sync`, `send-ticket`, `loyalty-engine` solo **leen**
+  `customers`; `admin-employees` escribe `profiles` y crea usuarios con
+  `user_metadata: { name }`. Ninguna escribe `customers.phone`.
+
+### RPC / RLS / privilegios (producción)
+
+| Control | Resultado remoto |
+|---|---|
+| RLS | `enabled=true`, `forced=false` |
+| Policies | `customers_insert` (INSERT, check), `customers_select` (SELECT, using), `customers_update` (UPDATE, using + check); todas `TO authenticated` con `auth.uid() = auth_user_id` |
+| Privilegios de tabla | `anon`: DELETE, INSERT, SELECT, TRUNCATE · `authenticated`: SELECT, TRUNCATE · `service_role` y `postgres`: los cinco |
+| Privilegio sobre `phone` | `anon`: INSERT=true, UPDATE=false · `authenticated`: INSERT=true, UPDATE=false |
+| Columnas actualizables por `authenticated` | `email`, `name`, `profile` |
+| Constraint | `customers_phone_e164_mx_check`: `NULL` o `+52` + 10 dígitos |
+| Índices | `customers_phone_idx`, `customers_phone_unique_key` (unicidad sobre los dígitos) |
+| Triggers | `customers_set_updated_at → set_updated_at` |
+| Funciones `public` que escriben `public.customers` | Ninguna detectada (`-`) |
+| RPCs de identidad | `phone_is_registered`, `email_is_registered`: SECURITY DEFINER, ejecutables por `anon`/`authenticated`/`service_role`, solo devuelven booleano · `resolve_email_for_login`: SECURITY DEFINER, solo `service_role` · `canonical_mx_phone`: INVOKER, solo `service_role` |
+
+`phone` no forma parte de las columnas que un cliente autenticado puede
+actualizar. El `INSERT` de `anon` existe como privilegio, pero RLS no tiene
+policy para `anon` y lo rechaza. La consulta de funciones solo detecta
+funciones existentes hoy; no afirma nada sobre funciones históricas.
+
+### Estado de datos en producción (agregados)
+
+| Métrica | Valor |
+|---|---|
+| Customers totales | 7 |
+| Con `phone` `NULL` | 4 |
+| Teléfonos no canónicos | 0 |
+| Duplicados por dígitos | 0 |
+| `phone` `NULL` con `metadata.phone` presente | 0 |
+| `phone` distinto de `metadata.phone` | 0 |
+
+Los cuatro `NULL` no indican corrupción por sí mismos: el teléfono es
+opcional en el registro y la métrica de `NULL` + metadata en `0` confirma
+que ninguno de ellos tiene un teléfono en la metadata de Auth que se haya
+perdido. La divergencia en `0` indica que no hay diferencias bajo la
+comparación usada (dígitos de la metadata frente a dígitos de
+`customers.phone`, con o sin `52`).
+
+### Migraciones `0018`–`0026` (identidad / teléfono)
+
+| Migración | Contribución |
+|---|---|
+| `0018` | Endurecimiento de RPCs del motor y validación del actor |
+| `0019` | Protección de `bible_verse_pool`; sin writer de phone |
+| `0020` | `resolve_email_for_login` restringida a `service_role` |
+| `0021` | Canonicalización histórica de `customers.phone` |
+| `0022` | `phone_is_registered` canónico + metadata pendiente; helper `canonical_mx_phone` privado |
+| `0023` | Bloqueo de `UPDATE` directo de `customers.phone` para clientes |
+| `0024` | Backfill controlado de los tres registros aprobados |
+| `0025` | Constraint E.164 MX |
+| `0026` | Eventos de sync backend-only (Fase 2A, sección Q); sin cambio de writers de phone |
+
+### Hallazgos
+
+- 🔴 **Crítico:** ninguno.
+- 🟠 **Alto:** ninguno.
+- 🟡 **Medio:**
+  1. **Teléfono inicial no verificado.** El teléfono participa en el
+     `INSERT` inicial sin verificar que el usuario controle el número. No
+     permite modificar un teléfono existente, pero la identidad telefónica
+     inicial depende de lo declarado en el registro.
+  2. **`metadata.phone` modificable con la API genérica de Auth.** No
+     modifica `customers.phone`, pero `phone_is_registered` considera esa
+     metadata al evaluar disponibilidad, lo que puede producir una reserva
+     lógica de un número sin customer correspondiente.
+  3. **Email suministrado por el cliente en el `INSERT`.** El `INSERT`
+     inicial acepta un email del cliente en lugar de derivarlo de la
+     identidad de Auth: riesgo de integridad/proveniencia de identidad; no
+     afecta a `customers.phone`.
+- 🔵 **Bajo:**
+  1. **Grants de tabla más amplios de lo necesario** (`anon`: DELETE,
+     INSERT, SELECT, TRUNCATE; `authenticated`: SELECT, TRUNCATE). RLS impide
+     que sean una vía efectiva de modificación por el acceso normal de
+     cliente: oportunidad de defensa en profundidad, no vulnerabilidad
+     confirmada.
+  2. **`body.name` en `loyverse-customers`** merece robustez adicional; no
+     afecta la protección de `customers.phone`.
+  3. **Manejo tolerante de errores en `readOwnCustomer`:** ante ciertos
+     errores de lectura provoca `INSERT` innecesarios, pero no puede
+     sobrescribir el teléfono de un customer existente.
+- 🟢 **Informativo (controles positivos):** `UPDATE` de `phone` bloqueado
+  por privilegios; RLS restringida por `auth.uid()`; constraint E.164 MX;
+  índice único; cero teléfonos no canónicos; cero duplicados; cero
+  divergencias en las comprobaciones de metadata; ninguna función SQL
+  writer detectada; ninguna Edge Function writer de `customers.phone`. El
+  teléfono es opcional en el registro, por lo que `NULL` es un estado
+  legítimo.
+
+### Pendientes recomendados
+
+Recomendaciones futuras, no vulnerabilidades explotables confirmadas; no
+se implementó ninguna:
+
+1. Evaluar verificación de control del teléfono antes de considerarlo
+   identidad confiable.
+2. Evaluar restricciones sobre `metadata.phone` y su interacción con
+   `phone_is_registered`.
+3. Derivar el email del usuario autenticado en el `INSERT`.
+4. Revisar y reducir grants de tabla sobrantes.
+5. Mantener `customers.phone` fuera de las columnas actualizables por
+   clientes.
+6. Si alguna vez se requiere cambiar un teléfono, hacerlo solo por un flujo
+   explícitamente autorizado y auditado.
+
+### Verificación remota
+
+Realizada el 2026-10-08 mediante una consulta SQL **exclusivamente de
+lectura** contra Supabase (sin teléfonos, emails ni identificadores en el
+resultado). **Producción coincide con el modelo esperado** para las
+protecciones de `customers.phone` (RLS, policies, privilegios de tabla y
+columna, constraint, índices, triggers, funciones y RPCs de identidad).
+
+### Conclusión
+
+**Fase 2C completada — auditoría local y verificación remota satisfactorias.
+No se identificó ningún mecanismo actual que permita a un cliente modificar,
+sobrescribir o eliminar el `phone` de un customer existente.** Permanecen
+tres riesgos 🟡 relacionados con el proceso de creación y la proveniencia de
+identidad y varios puntos 🔵 de hardening, ninguno implementado en esta
+fase.
+
+**No se modificó** en esta fase: código funcional, migraciones, Edge
+Functions, Supabase ni configuración; no se desplegó nada ni se ejecutaron
+migraciones. Solo se actualizó este README.
+
 ## Documentation
 
 - [`docs/security-hardening.md`](docs/security-hardening.md) — **Security
