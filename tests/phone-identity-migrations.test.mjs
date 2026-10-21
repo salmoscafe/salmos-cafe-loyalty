@@ -183,7 +183,7 @@ test("0021: normaliza, omite conflictos/ambiguos/inválidos, audita sin teléfon
 });
 
 // ======================= 0023 revocar UPDATE de phone =======================
-test("0023: el cliente no puede cambiar su teléfono, pero sí crear su perfil con teléfono y editar name/email/profile", async () => {
+test("0028: el cliente ya no ESCRIBE customers; la creación va por ensure_own_customer (0027)", async () => {
   const gdb = await createDatabase();
   const seed = makeSeeder(gdb, "dddddddd");
   const owner = await seed({ phone: "+526645551001" });
@@ -194,18 +194,25 @@ test("0023: el cliente no puede cambiar su teléfono, pero sí crear su perfil c
   assert.equal(upPhone.ok, false);
   assert.match(upPhone.error, /permission denied/);
 
+  // 0028: hasta name/email/profile (permitidos desde 0023) quedan revocados.
   const upName = await runAs(gdb, who, "update public.customers set name = 'Nuevo', email = 'n@test.local' where auth_user_id = $1 returning name", [owner.uid]);
-  assert.equal(upName.ok, true, upName.error);
-  assert.equal(upName.rows[0].name, "Nuevo");
+  assert.equal(upName.ok, false, "authenticated ya no edita la fila");
+  assert.match(upName.error, /permission denied/);
 
-  const ins = await runAs(
+  // 0028: el INSERT directo (flujo antiguo de ensureCustomerProfile) muere;
+  // la creación real es la RPC 0027 (SECURITY DEFINER, execute authenticated).
+  const directIns = await runAs(
     gdb,
     asUser(fresh.uid),
     "insert into public.customers (auth_user_id, name, customer_code, phone) values ($1, 'F', 'SC-FFFFFFFF', '+526645551002') returning phone",
     [fresh.uid]
   );
-  assert.equal(ins.ok, true, ins.error);
-  assert.equal(ins.rows[0].phone, "+526645551002", "INSERT inicial con teléfono sigue permitido");
+  assert.equal(directIns.ok, false, "INSERT directo revocado");
+  assert.match(directIns.error, /permission denied/);
+
+  const rpc = await commitAs(gdb, asUser(fresh.uid), "select * from public.ensure_own_customer()");
+  assert.equal(rpc[0].auth_user_id, fresh.uid, "el registro sigue funcionando vía la RPC");
+  assert.equal(rpc[0].phone, "+526645551002", "la RPC canonicaliza el teléfono de la metadata");
 
   const anonUp = await runAs(gdb, ANON, "update public.customers set phone = '+526645550000' returning id");
   assert.equal(anonUp.ok, false);
@@ -214,8 +221,8 @@ test("0023: el cliente no puede cambiar su teléfono, pero sí crear su perfil c
   assert.equal(svc.ok, true, svc.error);
 });
 
-test("conflicto al crear perfil con teléfono ajeno: 23505 y el otro cliente queda intacto", async () => {
-  const cdb = await createDatabase();
+test("(snapshot pre-0027) conflicto al crear perfil con teléfono ajeno: 23505 y el otro cliente queda intacto", async () => {
+  const cdb = await createDatabase({ upTo: "0026" });
   const seed = makeSeeder(cdb, "eeeeeeee");
   const holder = await seed({ phone: "+526645552001" });
   const newcomer = await seed({ customer: false, meta: { phone: "+526645552001" } });
