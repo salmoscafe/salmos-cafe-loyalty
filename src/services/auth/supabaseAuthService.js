@@ -31,7 +31,6 @@
 // ---------------------------------------------------------------
 
 import { supabaseClient } from "../../lib/supabase/client.js";
-import { generateCustomerCode } from "../../lib/customerCode.js";
 import { toE164Mx } from "../../lib/phone.js";
 import { ensureLoyaltyProfile } from "../customers/customerService.js";
 import { createOrLinkLoyverseCustomer } from "../loyverse/loyverseCustomerService.js";
@@ -94,38 +93,24 @@ export function phoneIdentifierForLogin(identifier) {
 // ---------------------------------------------------------------------------
 // Perfil `customers` (Supabase). La fila real del cliente de Salmos.
 // ---------------------------------------------------------------------------
-
-async function uniqueCustomerCode() {
-  for (let i = 0; i < 6; i++) {
-    const candidate = generateCustomerCode();
-    const { data: clash } = await supabaseClient
-      .from("customers")
-      .select("id")
-      .eq("customer_code", candidate)
-      .maybeSingle();
-    if (!clash) return candidate;
-  }
-  throw new Error("customer_code_unavailable");
-}
-
-// Crea la fila real si no existe (idempotente). Nunca crea un segundo
-// perfil para el mismo auth_user_id (índice único en la BD).
 //
-// Teléfono (fuente oficial: customers.phone, formato E.164 MX):
-//   * Se fija SOLO al crear la fila. Si ya existe, se devuelve tal cual:
-//     la metadata nunca se vuelve a leer ni sobrescribe customers.phone.
-//   * Origen al crear: parámetro explícito `phone`, o el transporte del
-//     registro `user.user_metadata.phone` (signUpWithEmail lo guarda
-//     ahí porque la fila aún no existe). auth.users.phone (GoTrue) NO se
-//     usa: sin proveedor SMS no es una fuente válida.
-//   * Solo se persiste si normaliza a E.164 MX (toE164Mx); si no, null.
-//   * Conflicto de unicidad del teléfono (customers_phone_unique_key):
-//     el número ya pertenece a OTRO cliente. No se toca a ese cliente ni
-//     se toma el número: la fila se crea sin teléfono (la sesión sigue) y
-//     el perfil devuelto lleva `phoneConflict: true` para que la UI/soporte
-//     lo vean. El caso queda además detectable en la base (metadata con
-//     teléfono + customers.phone null → pre-chequeo/backfill auditado).
-export const PHONE_UNIQUE_CONSTRAINT = "customers_phone_unique_key";
+// CONTRATO (0027): la creación/garantía de la fila la resuelve en el
+// SERVIDOR la RPC public.ensure_own_customer() (SECURITY DEFINER, execute
+// solo authenticated), jamás el navegador:
+//   * el cliente YA NO genera customer_code (lo genera la RPC server-side,
+//     mismo alfabeto que src/lib/customerCode.js) ni necesita
+//     uniqueCustomerCode/read: la RPC es idempotente — crea si falta y
+//     devuelve la fila existente en caso contrario.
+//   * email / email_verified / phone se derivan de auth.users (fuente de
+//     verdad); customers.email queda como caché y NO se reescribe aquí.
+//   * _conflict_phone = true cuando el teléfono del registro ya pertenecía a
+//     otro cliente y la fila se creó SIN teléfono (nunca se toca al otro).
+//   * La RPC filtra exclude_loyalty por construcción (returns table mínima).
+//
+// phoneConflict hacia la UI: la RPC lo entrega en `_conflict_phone` en la
+// sesión donde se crea la fila. Para mantener la UX en sesiones posteriores
+// (fila sin teléfono + metadata con teléfono) se deriva además como
+// `initialProfilePhone(user) && !row.phone`.
 
 export function initialProfilePhone(user, phone) {
   if (phone) return toE164Mx(phone) || null;
@@ -133,58 +118,17 @@ export function initialProfilePhone(user, phone) {
   return typeof metaPhone === "string" ? toE164Mx(metaPhone) || null : null;
 }
 
-function isUniqueViolation(error) {
-  return String(error?.code || "") === "23505" || String(error?.message || "").includes("duplicate");
-}
-
-function isPhoneUniqueViolation(error) {
-  const text = `${error?.message || ""} ${error?.details || ""}`;
-  return isUniqueViolation(error) && text.includes(PHONE_UNIQUE_CONSTRAINT);
-}
-
-async function readOwnCustomer(user) {
-  const { data } = await supabaseClient.from("customers").select("*").eq("auth_user_id", user.id).maybeSingle();
-  return data || null;
-}
-
-export async function ensureCustomerProfile(user, { name, email, phone }) {
+// Fila real del cliente (crea si falta). Ver contrato 0027 arriba.
+export async function ensureCustomerProfile(user) {
   if (!supabaseClient) return null;
-  const existing = await readOwnCustomer(user);
-  if (existing) return existing;
-
-  const customerCode = await uniqueCustomerCode();
-  const displayName =
-    name || user.user_metadata?.name || user.user_metadata?.full_name || (user.email ? user.email.split("@")[0] : "") || "";
-
-  const insertRow = {
-    auth_user_id: user.id,
-    name: displayName || "Cliente Salmos",
-    email: email ? String(email).trim().toLowerCase() : user.email || null,
-    phone: initialProfilePhone(user, phone),
-    customer_code: customerCode,
+  const { data, error } = await supabaseClient.rpc("ensure_own_customer");
+  if (error) throw error;
+  const row = Array.isArray(data) ? data[0] : (data ?? null);
+  if (!row) return null;
+  return {
+    ...row,
+    phoneConflict: Boolean(row._conflict_phone) || Boolean(initialProfilePhone(user) && !row.phone),
   };
-
-  let { data, error } = await supabaseClient.from("customers").insert(insertRow).select("*").single();
-
-  if (error && insertRow.phone && isPhoneUniqueViolation(error)) {
-    // El teléfono es de otro cliente: crear SIN teléfono (nunca tocar al otro).
-    ({ data, error } = await supabaseClient
-      .from("customers")
-      .insert({ ...insertRow, phone: null })
-      .select("*")
-      .single());
-    if (!error && data) return { ...data, phoneConflict: true };
-  }
-
-  if (error) {
-    if (isUniqueViolation(error)) {
-      // carrera por customer_code o auth_user_id: releer y devolver.
-      const retry = await readOwnCustomer(user);
-      if (retry) return retry;
-    }
-    throw error;
-  }
-  return data;
 }
 
 async function runLoyverseSync(profile) {
@@ -222,7 +166,7 @@ function toClientCustomer(profile) {
 async function buildSession(user) {
   let profile;
   try {
-    profile = await ensureCustomerProfile(user, {});
+    profile = await ensureCustomerProfile(user);
   } catch {
     return null;
   }
@@ -282,7 +226,7 @@ export async function retryLoyverseSync() {
   if (!sessionData?.session?.user) return { ok: false };
   let profile;
   try {
-    profile = await ensureCustomerProfile(sessionData.session.user, {});
+    profile = await ensureCustomerProfile(sessionData.session.user);
   } catch {
     return { ok: false };
   }
